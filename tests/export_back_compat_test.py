@@ -457,6 +457,26 @@ class CompatTest(bctu.CompatTestBase):
     operand = jnp.reshape(jnp.arange(math.prod(shape), dtype=dtype), shape)
     return lax.linalg.qr(operand, full_matrices=True)
 
+  def check_qr_results(self, operand, res_now, res_expected, *,
+                       rtol=None, atol=None):
+    # QR factors are not elementwise unique: columns of Q and matching rows of
+    # R may differ by a sign/phase, and rank-deficient inputs leave the null
+    # space basis unspecified. Check the mathematical QR contract instead of
+    # comparing against factors produced by a particular solver version.
+    del res_expected
+    q_now, r_now = res_now
+    self.assertDtypesMatch(q_now, operand)
+    self.assertDtypesMatch(r_now, operand)
+    self.assertAllClose(np.matmul(q_now, r_now), operand,
+                        rtol=rtol, atol=atol)
+
+    qh_q = np.matmul(np.conj(np.swapaxes(q_now, -1, -2)), q_now)
+    eye = np.broadcast_to(
+        np.eye(q_now.shape[-1], dtype=q_now.dtype), qh_q.shape)
+    self.assertAllClose(qh_q, eye, rtol=rtol, atol=atol)
+    self.assertAllClose(np.tril(r_now, k=-1), np.zeros_like(r_now),
+                        rtol=rtol, atol=atol)
+
   @parameterized.named_parameters(
       dict(testcase_name=f"_dtype={dtype_name}", dtype_name=dtype_name)
       for dtype_name in ("f32", "f64", "c64", "c128"))
@@ -464,13 +484,18 @@ class CompatTest(bctu.CompatTestBase):
     if not config.enable_x64.value and dtype_name in ["f64", "c128"]:
       self.skipTest("Test disabled for x32 mode")
     rtol = dict(f32=1e-3, f64=1e-5, c64=1e-3, c128=1e-5)[dtype_name]
+    atol = dict(f32=1e-5, f64=1e-12, c64=1e-5, c128=1e-12)[dtype_name]
     dtype = dict(f32=np.float32, f64=np.float64,
                  c64=np.complex64, c128=np.complex128)[dtype_name]
-    func = lambda: CompatTest.qr_harness((3, 3), dtype)
+    shape = (3, 3)
+    func = lambda: CompatTest.qr_harness(shape, dtype)
+    operand = np.reshape(np.arange(math.prod(shape), dtype=dtype), shape)
 
     info = cpu_qr_lapack_geqrf.data_2025_04_02[dtype_name]
     data = self.load_testdata(info)
-    self.run_one_test(func, data, rtol=rtol)
+    self.run_one_test(
+        func, data, rtol=rtol, atol=atol,
+        check_results=partial(self.check_qr_results, operand))
 
   @parameterized.named_parameters(
       dict(testcase_name=f"_dtype={dtype_name}", dtype_name=dtype_name)
@@ -481,8 +506,10 @@ class CompatTest(bctu.CompatTestBase):
     dtype = dict(f32=np.float32, f64=np.float64,
                  c64=np.complex64, c128=np.complex128)[dtype_name]
     rtol = dict(f32=1e-3, f64=1e-5, c64=1e-3, c128=1e-5)[dtype_name]
+    atol = dict(f32=1e-5, f64=1e-12, c64=1e-5, c128=1e-12)[dtype_name]
     shape = (2, 3, 3)
     func = lambda: CompatTest.qr_harness(shape, dtype)
+    operand = np.reshape(np.arange(math.prod(shape), dtype=dtype), shape)
 
     platform_data = None
     if jtu.test_device_matches(["cuda"]):
@@ -495,7 +522,9 @@ class CompatTest(bctu.CompatTestBase):
       self.skipTest("Unsupported platform")
 
     data = self.load_testdata(platform_data)
-    self.run_one_test(func, data, rtol=rtol)
+    self.run_one_test(
+        func, data, rtol=rtol, atol=atol,
+        check_results=partial(self.check_qr_results, operand))
 
   def test_tpu_Qr(self):
     # For lax.linalg.qr
