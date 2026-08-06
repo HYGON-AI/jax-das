@@ -174,10 +174,49 @@ def subcase_from_nodeid(nodeid: str, rel: str) -> str:
   prefix = f"{rel}::"
   return nodeid[len(prefix):] if nodeid.startswith(prefix) else nodeid
 
+def segfault_reason(text: str) -> str | None:
+  marker = "Fatal Python error: Segmentation fault"
+  if marker not in text:
+    return None
+
+  stack = text.split(marker, 1)[1]
+  test_frame = re.search(
+      r'File "([^"]*/tests/[^"]+)", line (\d+) in ([^\n]+)', stack)
+  if test_frame:
+    test_path, line, function = test_frame.groups()
+    trigger = f"{Path(test_path).name}:{line}::{function.strip()}"
+  else:
+    trigger = "backend_compile_and_load（日志中未提取到具体测试函数）"
+
+  ignored_frames = {
+      "backend_compile_and_load", "wrapper", "_compile_and_write_cache",
+      "compile_or_get_cached", "_cached_compilation", "from_hlo", "compile",
+      "_pjit_call_impl_python", "_run_python_pjit", "cache_miss",
+      "reraise_with_filtered_traceback", "apply_primitive", "process_primitive",
+      "bind_with_trace", "bind", "call_wrapped",
+  }
+  operation = ""
+  for path, function in re.findall(
+      r'File "([^"]*/site-packages/jax/[^"]+)", line \d+ in ([^\n]+)', stack):
+    function = function.strip()
+    if function not in ignored_frames:
+      operation = f"，相关 JAX 算子栈：{Path(path).name}::{function}"
+      break
+
+  return clean_reason(
+      "error: Segmentation fault；文件级崩溃触发点：XLA "
+      f"backend_compile_and_load 编译 {trigger}{operation} 时发生 native SIGSEGV；"
+      "推测根因：gfx936 GPU lowering 与 Triton/AILLVM 适配尚不完整，"
+      "需通过 core/gdb native backtrace 最终确认；说明：pytest 若未写出 JUnit XML，"
+      "文件内无结果的子测例会批量继承本错误，并非每条子测例都单独发生 SIGSEGV")
+
 def reason_from_log(log_path: Path, fallback: str) -> str:
   if not log_path.exists():
     return fallback
   text = ansi_re.sub("", log_path.read_text(errors="replace"))
+  segfault = segfault_reason(text)
+  if segfault:
+    return segfault
   patterns = [
       r"Fatal Python error: Aborted.*",
       r"LLVM ERROR:.*",

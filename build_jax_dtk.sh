@@ -14,7 +14,7 @@ else
 fi
 DTK_DIR="${DTK_DIR:-/opt/dtk}"
 AILLVM_DIR="${AILLVM_DIR:-${DTK_DIR}/aillvm}"
-TRITON_DIR="${TRITON_DIR:-../triton-xla-local}"
+TRITON_DIR="${TRITON_DIR:-../triton}"
 PYTHON_BIN="${PYTHON_BIN:-python3.11}"
 OUT_DIR="${OUT_DIR:-${ROOT_DIR}/dist}"
 DTK_WHEEL_VERSION_SUFFIX="${DTK_WHEEL_VERSION_SUFFIX:-+das.opt1.dtk2604}"
@@ -36,7 +36,7 @@ while (($#)); do
       echo "  XLA_DIR     XLA source tree. Defaults to ../xla relative to JAX_DIR."
       echo "  DTK_DIR     DTK installation. Defaults to /opt/dtk."
       echo "  AILLVM_DIR  HCU LLVM installation. Defaults to \${DTK_DIR}/aillvm."
-      echo "  TRITON_DIR  HCU Triton source with Bazel metadata. Defaults to ../triton-xla-local."
+      echo "  TRITON_DIR  HCU Triton source with Bazel metadata. Defaults to ../triton."
       echo "  DTK_WHEEL_VERSION_SUFFIX"
       echo "              Wheel local version suffix. Defaults to +das.opt1.dtk2604."
       exit 0
@@ -87,7 +87,7 @@ if [[ "${TRITON_DIR}" != /* ]]; then
 fi
 if [[ ! -f "${TRITON_DIR}/BUILD" ]]; then
   echo "Bazel-enabled Triton source not found: ${TRITON_DIR}" >&2
-  echo "Set TRITON_DIR=/path/to/triton-xla-local." >&2
+  echo "Set TRITON_DIR=/path/to/triton." >&2
   exit 1
 fi
 TRITON_DIR="$(cd "${TRITON_DIR}" && pwd)"
