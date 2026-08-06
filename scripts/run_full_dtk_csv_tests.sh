@@ -30,6 +30,7 @@ set +u
 source "${DTK_DIR}/env.sh"
 set -u
 unset PYTHONPATH
+export PYTHONPATH="${ROOT_DIR}"
 
 export PY_COLORS="${PY_COLORS:-1}"
 export JAX_SKIP_SLOW_TESTS="${JAX_SKIP_SLOW_TESTS:-true}"
