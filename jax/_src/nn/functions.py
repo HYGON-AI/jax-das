@@ -35,6 +35,10 @@ from jax._src import util
 from jax._src.core import AxisName
 from jax._src.cudnn.fused_attention_stablehlo import (
     dot_product_attention as cudnn_dot_product_attention, MaskType)
+from jax._src.cudnn.miopen_attention_stablehlo import (
+    dot_product_attention as miopen_dot_product_attention)
+from jax._src.cudnn.cutlass_fa_attention_stablehlo import (
+    dot_product_attention as cutlass_dot_product_attention)
 from jax._src.cudnn.scaled_matmul_stablehlo import (
     scaled_matmul_wrapper as cudnn_scaled_matmul,
     scaled_dot_general_wrapper as cudnn_scaled_dot_general,
@@ -1024,7 +1028,7 @@ def dot_product_attention(
     query_seq_lengths: ArrayLike | None = None,
     key_value_seq_lengths: ArrayLike | None = None,
     local_window_size: int | tuple[int, int] | None = None,
-    implementation: Literal['xla', 'cudnn'] | None = None,
+    implementation: Literal['xla', 'cudnn', 'miopen', 'cutlass'] | None = None,
     return_residual: Literal[False] = ...,
 ) -> Array: ...
 
@@ -1041,7 +1045,7 @@ def dot_product_attention(
     query_seq_lengths: ArrayLike | None = None,
     key_value_seq_lengths: ArrayLike | None = None,
     local_window_size: int | tuple[int, int] | None = None,
-    implementation: Literal['xla', 'cudnn'] | None = None,
+    implementation: Literal['xla', 'cudnn', 'miopen', 'cutlass'] | None = None,
     return_residual: Literal[True] = ...,
 ) -> tuple[Array, Array]: ...
 
@@ -1057,7 +1061,7 @@ def dot_product_attention(
     query_seq_lengths: ArrayLike | None = None,
     key_value_seq_lengths: ArrayLike | None = None,
     local_window_size: int | tuple[int, int] | None = None,
-    implementation: Literal['xla', 'cudnn'] | None = None,
+    implementation: Literal['xla', 'cudnn', 'miopen', 'cutlass'] | None = None,
     return_residual: bool = False,
 ):
   r"""Scaled dot product attention function.
@@ -1122,7 +1126,9 @@ def dot_product_attention(
       or BNT to users. See section 3.1.1 in the FlashAttention-2 paper:
       https://arxiv.org/pdf/2307.08691 to find the definition of logsumexp.
     implementation: A string to control which implementation backend to use.
-      Supported strings are `xla`, `cudnn` (cuDNN flash attention). It defaults
+      Supported strings are `xla`, `cudnn` (cuDNN flash attention), `miopen`
+      (DTK MIOpen flash attention), and `cutlass` (DTK Cutlass flash attention).
+      It defaults
       to `None`, which currently falls back to `xla`.
       Note, `cudnn` supports only a subset of shapes/dtypes, and an exception
       will be thrown if its not supported.
@@ -1229,6 +1235,48 @@ def dot_product_attention(
         out, residual = out
         residual = jnp.transpose(residual, (0, 2, 1)).astype(out.dtype)
         out = (out, residual)
+    case 'miopen' | 'cutlass':
+      if return_residual:
+        raise NotImplementedError(
+            f"{implementation} flash attention does not support return_residual")
+      use_padding = (
+           query_seq_lengths is not None or key_value_seq_lengths is not None
+      )
+      if use_padding:
+        if query_seq_lengths is None:
+          T = query_arr.shape[1]
+          query_seq_lengths = jnp.full((B,), T, dtype=np.int32)
+        if key_value_seq_lengths is None:
+          key_value_seq_lengths = jnp.full((B,), S, dtype=np.int32)
+
+      mask_type = MaskType.NO_MASK
+      if use_padding and is_causal:
+        mask_type = MaskType.PADDING_CAUSAL
+      elif is_causal:
+        mask_type = MaskType.CAUSAL
+      elif use_padding:
+        mask_type = MaskType.PADDING
+
+      sliding_window = None
+      if local_window_size is not None:
+        l_window, r_window = local_window_size
+        if r_window == 0 or mask_type == MaskType.CAUSAL:
+          sliding_window = l_window + 1
+        else:
+          raise ValueError(
+              f"{implementation} flash attention doesn't support right "
+              f"window: {r_window} when causal mask is not used.")
+
+      dpa_impl = (
+          miopen_dot_product_attention
+          if implementation == 'miopen'
+          else cutlass_dot_product_attention
+      )
+      out = dpa_impl(
+          query_arr, key_arr, value_arr, bias, mask, query_seq_lengths,
+          key_value_seq_lengths, scale=scale_val, mask_type=mask_type,
+          sliding_window_length=sliding_window,
+      )
     case None:
       # TODO(kaixih@nvidia) Automatically select the best backend (defaults to XLA for now).
       out = _dot_product_attention_xla(
