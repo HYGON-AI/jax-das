@@ -16,6 +16,9 @@ import contextlib
 from functools import partial
 import itertools
 import math
+import os
+from pathlib import Path
+import re
 
 from absl.testing import absltest
 from absl.testing import parameterized
@@ -38,6 +41,28 @@ import jax.numpy as jnp
 from jax._src.util import split_list
 import numpy as np
 import scipy.sparse
+
+def get_rocm_version():
+  rocm_path = os.environ.get("ROCM_PATH", "/opt/rocm")
+  info_dir = Path(rocm_path) / ".info"
+  for version_path in (
+      info_dir / "version",
+      info_dir / "rocm_version",
+      info_dir / "version-dev",
+      info_dir / "version-libs",
+      Path(rocm_path) / ".dtk_version",
+  ):
+    if version_path.exists():
+      version_str = version_path.read_text().strip()
+      break
+  else:
+    raise FileNotFoundError(
+        f"Expected ROCm/DTK version file under {info_dir} or {rocm_path}")
+  version_match = re.search(r"(\d+)\.(\d+)", version_str)
+  if version_match is None:
+    raise ValueError(f"Could not parse ROCm/DTK version from {version_path}")
+  major, minor = version_match.groups()
+  return int(major), int(minor)
 
 jax.config.parse_flags_with_absl()
 

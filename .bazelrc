@@ -48,6 +48,15 @@ common --copt=-DNB_DOMAIN=jax
 
 common --legacy_external_runfiles=false
 
+try-import %workspace%/build/rocm/rocm.bazelrc
+
+# DTK ROCm codegen backend selection. HCU is the default in the local XLA
+# override; use --config=gcvm to build with GCVM instead.
+common:gcvm --copt=-DXLA_ROCM_ENABLE_GCVM=1
+common:gcvm --copt=-DXLA_ROCM_ENABLE_HCU=0
+common:hcu --copt=-DXLA_ROCM_ENABLE_GCVM=0
+common:hcu --copt=-DXLA_ROCM_ENABLE_HCU=1
+
 # #############################################################################
 # Platform Specific configs below. These are automatically picked up by Bazel
 # depending on the platform that is running the build.

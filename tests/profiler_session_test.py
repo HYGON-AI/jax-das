@@ -20,6 +20,8 @@ import jax
 from jax._src import test_util as jtu
 import jax.numpy as jnp
 
+jax.config.parse_flags_with_absl()
+
 _TEST_SESSION_ID = 'my_custom_session_123'
 
 
