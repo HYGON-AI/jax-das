@@ -15,6 +15,7 @@ fi
 DTK_DIR="${DTK_DIR:-/opt/dtk}"
 PYTHON_BIN="${PYTHON_BIN:-python3.11}"
 OUT_DIR="${OUT_DIR:-${ROOT_DIR}/dist}"
+DTK_WHEEL_VERSION_SUFFIX="${DTK_WHEEL_VERSION_SUFFIX:-+das.opt1.dtk2604}"
 # DTK HIP/DCC 25.10 accepts these targets for precompiled plugin kernels.
 # gfx92a is still allowed in XLA runtime codegen, but hipcc rejects it
 # as a build target in this DTK release.
@@ -32,6 +33,8 @@ while (($#)); do
       echo "  JAX_DIR     JAX source tree. Defaults to this script directory."
       echo "  XLA_DIR     XLA source tree. Defaults to ../xla relative to JAX_DIR."
       echo "  DTK_DIR     DTK installation. Defaults to /opt/dtk."
+      echo "  DTK_WHEEL_VERSION_SUFFIX"
+      echo "              Wheel local version suffix. Defaults to +das.opt1.dtk2604."
       exit 0
       ;;
     --gcvm)
@@ -86,6 +89,7 @@ cd "${JAX_DIR}"
 echo "ROCm codegen config: ${ROCM_CODEGEN_CONFIG}"
 echo "JAX source: ${JAX_DIR}"
 echo "XLA source: ${XLA_DIR}"
+echo "Wheel version suffix: ${DTK_WHEEL_VERSION_SUFFIX}"
 
 "${PYTHON_BIN}" build/build.py build \
   --wheels=jax,jaxlib,jax-rocm-plugin,jax-rocm-pjrt \
@@ -96,6 +100,9 @@ echo "XLA source: ${XLA_DIR}"
   --local_xla_path="${XLA_DIR}" \
   --clang_path="${DTK_DIR}/llvm/bin/clang" \
   --output_path="${OUT_DIR}" \
+  --bazel_options="--repo_env=ML_WHEEL_TYPE=release" \
+  --bazel_options="--repo_env=ML_WHEEL_VERSION_SUFFIX=${DTK_WHEEL_VERSION_SUFFIX}" \
+  --bazel_options="--//jaxlib/tools:jaxlib_git_hash=$(git rev-parse HEAD)" \
   --bazel_options="--config=${ROCM_CODEGEN_CONFIG}" \
   --verbose
 
