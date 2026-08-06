@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import os
 import re
+import zlib
 from jax._src import clusters
 
 #  OMPI_MCA_orte_hnp_uri exists only when processes are launched via mpirun or mpiexec
@@ -23,6 +24,15 @@ _ORTE_URI = 'OMPI_MCA_orte_hnp_uri'
 _PROCESS_COUNT = 'OMPI_COMM_WORLD_SIZE'
 _PROCESS_ID = 'OMPI_COMM_WORLD_RANK'
 _LOCAL_PROCESS_ID = 'OMPI_COMM_WORLD_LOCAL_RANK'
+_PMIX_NAMESPACE = 'PMIX_NAMESPACE'
+
+
+def _pmix_server_uri() -> str | None:
+  for name, value in os.environ.items():
+    if name.startswith('PMIX_SERVER_URI'):
+      return value
+  return None
+
 
 class OmpiCluster(clusters.ClusterEnv):
 
@@ -30,24 +40,35 @@ class OmpiCluster(clusters.ClusterEnv):
 
   @classmethod
   def is_env_present(cls) -> bool:
-    return _ORTE_URI in os.environ
+    return _ORTE_URI in os.environ or _pmix_server_uri() is not None
 
   @classmethod
   def get_coordinator_address(cls, timeout_secs: int | None, override_coordinator_port: str | None) -> str:
     # Examples of orte_uri:
     # 1531576320.0;tcp://10.96.0.1,10.148.0.1,10.108.0.1:34911
     # 1314521088.0;tcp6://[fe80::b9b:ac5d:9cf0:b858,2620:10d:c083:150e::3000:2]:43370
-    orte_uri = os.environ[_ORTE_URI]
+    launcher_uri = os.environ.get(_ORTE_URI) or _pmix_server_uri()
+    if launcher_uri is None:
+      raise RuntimeError('Open MPI launcher URI is not available.')
     if override_coordinator_port:
         port = override_coordinator_port
-    else:
-        job_id_str = orte_uri.split('.', maxsplit=1)[0]
+    elif _ORTE_URI in os.environ:
+        job_id_str = launcher_uri.split('.', maxsplit=1)[0]
         # The jobid is always a multiple of 2^12, let's divide it by 2^12
         # to reduce likelihood of port conflict between jobs
         job_id = int(job_id_str) // 2**12
         # Pick port in ephemeral range [(65535 - 2^12 + 1), 65535]
         port = str(job_id % 2**12 + (65535 - 2**12 + 1))
-    launcher_ip_match = re.search(r"tcp://(.+?)[,:]|tcp6://\[(.+?)[,\]]", orte_uri)
+    else:
+        namespace = os.environ.get(
+            _PMIX_NAMESPACE, launcher_uri.split(';', maxsplit=1)[0]
+        )
+        job_id = zlib.crc32(namespace.encode())
+        # Pick port in ephemeral range [(65535 - 2^12 + 1), 65535]
+        port = str(job_id % 2**12 + (65535 - 2**12 + 1))
+    launcher_ip_match = re.search(
+        r"tcp(?:4)?://(.+?)[,:]|tcp6://\[(.+?)[,\]]", launcher_uri
+    )
     if launcher_ip_match is None:
         raise RuntimeError('Could not parse coordinator IP address from Open MPI environment.')
     launcher_ip = next(i for i in launcher_ip_match.groups() if i is not None)
