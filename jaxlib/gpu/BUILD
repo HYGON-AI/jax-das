@@ -49,6 +49,9 @@ exports_files(srcs = [
     "linalg_kernels.h",
     "make_batch_pointers.cu.cc",
     "make_batch_pointers.h",
+    "miopen_mha.cc",
+    "miopen_mha_kernel.cc",
+    "miopen_mha_kernel.h",
     "prng.cc",
     "prng_kernels.cc",
     "prng_kernels.cu.cc",
@@ -73,6 +76,9 @@ exports_files(srcs = [
     "triton_kernels.h",
     "triton_utils.cc",
     "triton_utils.h",
+    "cutlass_fa.cc",
+    "cutlass_fa_kernel.cc",
+    "cutlass_fa_kernel.h",
     "vendor.h",
 ])
 
