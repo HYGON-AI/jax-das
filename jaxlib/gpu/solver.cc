@@ -13,6 +13,10 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
+// Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+// SPDX-License-Identifier: Apache-2.0
+// Modified by Hygon Information Technology Co., Ltd., 2026.
+
 #include "nanobind/nanobind.h"
 #include "jaxlib/gpu/solver_kernels_ffi.h"
 #include "jaxlib/gpu/vendor.h"
