@@ -22,7 +22,7 @@ LOG_DIR="./logs"
 # --------------------------------------------------------------------------------
 # Function to detect number of AMD/ATI GPUs using lspci.
 # --------------------------------------------------------------------------------
-detect_amd_gpus() {
+detect_hcu_devices() {
     # Make sure lspci is installed.
     if ! command -v lspci &>/dev/null; then
         echo "Error: lspci command not found. Aborting."
@@ -30,7 +30,14 @@ detect_amd_gpus() {
     fi
     # Count AMD/ATI GPU controllers.
     local count
+    local xtrace_enabled=0
+    case "$-" in
+        *x*) xtrace_enabled=1; set +x ;;
+    esac
     count=$(lspci | grep -c 'controller.*AMD/ATI')
+    if [[ "$xtrace_enabled" -eq 1 ]]; then
+        set -x
+    fi
     echo "$count"
 }
 
@@ -74,8 +81,8 @@ run_tests() {
 main() {
     # Detect number of AMD/ATI GPUs.
     local gpu_count
-    gpu_count=$(detect_amd_gpus)
-    echo "Number of AMD/ATI GPUs detected: $gpu_count"
+    gpu_count=$(detect_hcu_devices)
+    echo "Number of HCU devices detected: $gpu_count"
 
     # Decide how many GPUs to enable based on count.
     if [[ "$gpu_count" -ge 8 ]]; then
