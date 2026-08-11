@@ -789,7 +789,7 @@ def _infer_arch() -> tuple[int, int]:
   # Handle ROCm devices that return architecture strings like "gfxXXX".
   if arch_name.startswith("gfx"):
     raise ValueError(
-        f"Mosaic GPU does not yet support AMD ROCm devices. "
+        f"Mosaic GPU does not yet support HCU/ROCm devices. "
         f"Got compute_capability: {arch_name}"
     )
   return tuple(map(int, arch_name.split(".")))  # pyrefly: ignore[bad-return]
