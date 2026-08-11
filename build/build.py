@@ -272,7 +272,7 @@ def add_artifact_subcommand_arguments(parser: argparse.ArgumentParser):
       "--rocm_amdgpu_targets",
       type=str,
       default="gfx900,gfx906,gfx908,gfx90a,gfx940,gfx941,gfx942,gfx1030,gfx1100,gfx1200,gfx1201",
-      help="A comma-separated list of ROCm amdgpu targets to support.",
+      help="A comma-separated list of ROCm HCU device targets to support.",
   )
 
   rocm_group.add_argument(
@@ -650,7 +650,7 @@ async def main():
       logging.debug("ROCm toolkit path: %s", args.rocm_path)
       wheel_build_command_base.append(f"--action_env=ROCM_PATH=\"{args.rocm_path}\"")
     if args.rocm_amdgpu_targets:
-      logging.debug("ROCm AMD GPU targets: %s", args.rocm_amdgpu_targets)
+      logging.debug("ROCm HCU device targets: %s", args.rocm_amdgpu_targets)
       wheel_build_command_base.append(
           f"--repo_env=TF_ROCM_AMDGPU_TARGETS={args.rocm_amdgpu_targets}"
       )
