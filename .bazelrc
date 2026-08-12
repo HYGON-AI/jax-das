@@ -52,6 +52,7 @@ try-import %workspace%/build/rocm/rocm.bazelrc
 
 # DTK ROCm codegen backend selection.  HCU backend only.
 common:hcu --copt=-DXLA_ROCM_ENABLE_HCU=1
+common:hcu --repo_env=HCU_ENABLED=1
 
 # #############################################################################
 # Platform Specific configs below. These are automatically picked up by Bazel
