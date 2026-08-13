@@ -10,14 +10,14 @@ JAX_DIR="${JAX_DIR:-${ROOT_DIR}}"
 #   /path/to/work/jax
 #   /path/to/work/xla
 if [[ -z "${XLA_DIR:-}" ]]; then
-  XLA_DIR="../xla"
+  XLA_DIR="../xla-das"
   XLA_DIR_FROM_DEFAULT=1
 else
   XLA_DIR_FROM_DEFAULT=0
 fi
 DTK_DIR="${DTK_DIR:-/opt/dtk}"
 AILLVM_DIR="${AILLVM_DIR:-${DTK_DIR}/aillvm}"
-PYTHON_BIN="${PYTHON_BIN:-python3.11}"
+PYTHON_BIN="${PYTHON_BIN:-python3}"
 OUT_DIR="${OUT_DIR:-${ROOT_DIR}/dist}"
 DTK_WHEEL_VERSION_SUFFIX="${DTK_WHEEL_VERSION_SUFFIX:-+das.opt1.dtk2604}"
 # DTK HIP/DCC 25.10 accepts these targets for precompiled plugin kernels.
@@ -102,7 +102,7 @@ echo "Wheel version suffix: ${DTK_WHEEL_VERSION_SUFFIX}"
 
 "${PYTHON_BIN}" build/build.py build \
   --wheels=jax,jaxlib,jax-rocm-plugin,jax-rocm-pjrt \
-  --python_version=3.11 \
+  --python_version=3.12 \
   --rocm_path="${DTK_DIR}" \
   --rocm_version=60 \
   --rocm_amdgpu_targets="${TARGETS}" \
