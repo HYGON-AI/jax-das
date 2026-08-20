@@ -542,7 +542,6 @@ def _dot_product_attention_bwd_cuda_lowering(
   )
   # {Q, K, V, activation, dO, bias*, O, q_seqlen*, kv_seqlen*}
   # {dQ, dK, dV, dbias*, workspace}
-  has_dropout = dropout_rate > 0
   has_bias, has_dbias = variadic_args
   # create operands
   operands = [query, key, value, activation, grad_output]
