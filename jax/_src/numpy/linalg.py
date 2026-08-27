@@ -1438,9 +1438,9 @@ def solve(a: ArrayLike, b: ArrayLike) -> Array:
   signature = "(m,m),(m)->(m)" if b.ndim == 1 else "(m,m),(m,n)->(m,n)"
   a, b = core.standard_insert_pvary(a, b)
 
-  # rocBLAS trsm_batched collapses at exactly one right-hand-side column at n=1. 
+  # rocBLAS trsm_batched collapses at exactly one right-hand-side column at n=1.
   # Padding does not change the answer at the algorithm level.
-  # Triangular-solve columns are mathematically independent. 
+  # Triangular-solve columns are mathematically independent.
   if (config.pad_solve_rhs.value and b.ndim >= 3
       and b.shape[-1] == 1 and b.shape[-2] == a.shape[-1]):
     b = jnp.concatenate([b, array_creation.zeros_like(b)], axis=-1)
