@@ -189,7 +189,14 @@ ffi::Error GetrfDispatch(gpuStream_t stream, ffi::ScratchAllocator scratch,
   FFI_RETURN_IF_ERROR(CheckShape(
       ipiv->dimensions(), {batch, std::min(rows, cols)}, "ipiv", "getrf"));
   FFI_RETURN_IF_ERROR(CheckShape(info->dimensions(), batch, "info", "getrf"));
-  if (batch > 1 && rows == cols && rows / batch <= 128) {
+  bool use_batched = batch > 1 && rows == cols && rows / batch <= 128;
+#if defined(JAX_GPU_HIP) && defined(JAX_GPU_HAVE_ROCSOLVER_GESDD) && \
+    !JAX_GPU_HAVE_ROCSOLVER_GESDD
+  const bool is_complex = dataType == ffi::C64 || dataType == ffi::C128;
+#else
+  constexpr bool is_complex = false;
+#endif
+  if (use_batched && !is_complex) {
     SOLVER_BLAS_DISPATCH_IMPL(GetrfBatchedImpl, batch, cols, stream, scratch, a,
                               out, ipiv, info);
   } else {
@@ -301,7 +308,15 @@ ffi::Error GeqrfDispatch(gpuStream_t stream, ffi::ScratchAllocator scratch,
       CheckShape(out->dimensions(), {batch, rows, cols}, "out", "geqrf"));
   FFI_RETURN_IF_ERROR(CheckShape(
       tau->dimensions(), {batch, std::min(rows, cols)}, "tau", "geqrf"));
-  if (batch > 1 && rows / batch <= 128 && cols / batch <= 128) {
+  bool use_batched =
+      batch > 1 && rows / batch <= 128 && cols / batch <= 128;
+#if defined(JAX_GPU_HIP) && defined(JAX_GPU_HAVE_ROCSOLVER_GESDD) && \
+    !JAX_GPU_HAVE_ROCSOLVER_GESDD
+  const bool is_complex = dataType == ffi::C64 || dataType == ffi::C128;
+#else
+  constexpr bool is_complex = false;
+#endif
+  if (use_batched && !is_complex) {
     SOLVER_BLAS_DISPATCH_IMPL(GeqrfBatchedImpl, batch, rows, cols, stream,
                               scratch, a, out, tau);
   } else {
