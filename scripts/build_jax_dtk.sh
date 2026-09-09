@@ -101,6 +101,10 @@ echo "XLA source: ${XLA_DIR}"
 echo "LLVM toolchain: ${AILLVM_DIR}"
 echo "DTK version: ${DTK_VERSION}"
 echo "Wheel version suffix: ${DTK_WHEEL_VERSION_SUFFIX}"
+# Bazel may reuse cached Triton from previous builds.
+# Remove stale Triton cache to make sure xla-das Triton patches are applied.
+echo "Cleaning stale Bazel Triton cache..."
+rm -rf /root/.cache/bazel/_bazel_root/*/external/triton*
 
 "${PYTHON_BIN}" build/build.py build \
   --wheels=jax,jaxlib,jax-rocm-plugin,jax-rocm-pjrt \
