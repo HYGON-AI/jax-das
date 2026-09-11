@@ -187,7 +187,7 @@ jobs:
           tar -czf logs.tar.gz logs
       - name: Configure AWS Credentials
         if: ${{ !cancelled() }}
-        uses: aws-actions/configure-aws-credentials@ec61189d14ec14c8efccab744f656cffd0e33f37 # ratchet:aws-actions/configure-aws-credentials@v6
+        uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # ratchet:aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: arn:aws:iam::661452401056:role/jax-ci-amd-s3-oidc
           aws-region: us-east-1
