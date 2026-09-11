@@ -77,7 +77,7 @@ jobs:
           echo "JAX_SKIP_SLOW_TESTS=$JAX_SKIP_SLOW_TESTS"
           pytest -n auto --tb=short --maxfail=20 tests examples
       - name: Notify failed build
-        uses: jayqi/failed-build-issue-action@1a893bbf43ef1c2a8705e2b115cd4f0fe3c5649b  # v1.2.0
+        uses: jayqi/failed-build-issue-action@940568ce50eeef3f31a920614cefcc6102d2f930  # v1.3.0
         if: failure() && github.event.pull_request == null
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
