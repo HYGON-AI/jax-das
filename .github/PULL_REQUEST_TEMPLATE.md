@@ -8,7 +8,7 @@ Explain why this change is important and which workload benefits from this chang
 Please remove what does not apply: 🐛 Bug Fix, ⚡️ Performance Improvement, ✨ New Feature, ♻️ Cleanup, 📚 Documentation, 🧪 Tests
 
 📊 Benchmark (for Performance Improvements)
-Please measure and include speedups for one of the public HLOs in .compiler/xla/tools/benchmarks/hlo/
+Please measure and include speedups for relevant JAX HCU kernels or operations.
 
 🧪 Unit Tests:
 What unit tests were added? For example, a new pass should be tested on minimal HLO. The transformation can be tested with FileCheck tests or assertions on the transformed HLO.
