@@ -1,11 +1,17 @@
-<!--
+📝 Summary of Changes
+Please provide a clear and concise summary of the changes you've made.
 
-Thanks for taking the time to contribute to JAX! A couple things to keep in mind:
+🎯 Justification
+Explain why this change is important and which workload benefits from this change.
 
-* Contributing to JAX requires signing the Contributor License Agreement: https://docs.jax.dev/en/latest/contributing.html#google-contributor-license-agreement
+🚀 Kind of Contribution
+Please remove what does not apply: 🐛 Bug Fix, ⚡️ Performance Improvement, ✨ New Feature, ♻️ Cleanup, 📚 Documentation, 🧪 Tests
 
-* Please run lint checks and tests locally: https://docs.jax.dev/en/latest/contributing.html#contributing-code-using-pull-requests
+📊 Benchmark (for Performance Improvements)
+Please measure and include speedups for one of the public HLOs in .compiler/xla/tools/benchmarks/hlo/
 
-* If applicable, read our policy on AI generated code: https://docs.jax.dev/en/latest/contributing.html#can-i-contribute-ai-generated-code
+🧪 Unit Tests:
+What unit tests were added? For example, a new pass should be tested on minimal HLO. The transformation can be tested with FileCheck tests or assertions on the transformed HLO.
 
--->
+🧪 Execution Tests:
+What execution tests were added? For example, a new optimization should be tested with an end-to-end execution test triggering the optimization and asserting correctness. Please provide test cases running with at most 2 GPUs.
