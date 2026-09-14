@@ -387,7 +387,8 @@ JAX_GPU_DEFINE_GESVDJ_BATCHED(gpuComplex, gpusolverDnCgesvdjBatched);
 JAX_GPU_DEFINE_GESVDJ_BATCHED(gpuDoubleComplex, gpusolverDnZgesvdjBatched);
 #undef JAX_GPU_DEFINE_GESVDJ_BATCHED
 
-#ifdef JAX_GPU_HIP
+#if defined(JAX_GPU_HIP) && defined(JAX_GPU_HAVE_ROCSOLVER_GESDD) && \
+    JAX_GPU_HAVE_ROCSOLVER_GESDD
 // GESDD (divide-and-conquer SVD) is provided by rocsolver; hipSOLVER does not
 // expose it. rocsolver uses rocblas_handle; on ROCm the solver handle is
 // compatible with rocblas_handle.
@@ -471,7 +472,7 @@ absl::Status SetWorkspace(gpusolverDnHandle_t handle, void* ptr, size_t size) {
   return RocblasStatusToStatus(st, __FILE__, __LINE__, "rocblas_set_workspace");
 }
 
-#endif  // JAX_GPU_HIP
+#endif  // defined(JAX_GPU_HIP) && JAX_GPU_HAVE_ROCSOLVER_GESDD
 
 #ifdef JAX_GPU_CUDA
 

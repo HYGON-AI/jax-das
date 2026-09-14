@@ -1279,7 +1279,8 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(GesvdjFfi, GesvdjDispatch,
                                   .Ret<ffi::Buffer<ffi::S32>>()  // info
 );
 
-#ifdef JAX_GPU_HIP
+#if defined(JAX_GPU_HIP) && defined(JAX_GPU_HAVE_ROCSOLVER_GESDD) && \
+    JAX_GPU_HAVE_ROCSOLVER_GESDD
 // Workspace size from LAPACK formula instead of querying rocsolver. A
 // two-phase rocsolver workspace query can fail with rocblas_status 8/9 in some
 // environments; the formula avoids that and never blocks. rocsolver gesdd
@@ -1438,7 +1439,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(GesddFfi, GesddDispatch,
                                   .Ret<ffi::AnyBuffer>()         // vt
                                   .Ret<ffi::Buffer<ffi::S32>>()  // info
 );
-#endif  // JAX_GPU_HIP
+#endif  // defined(JAX_GPU_HIP) && JAX_GPU_HAVE_ROCSOLVER_GESDD
 
 // Singular Value Decomposition: gesvdp (Polar decomposition)
 

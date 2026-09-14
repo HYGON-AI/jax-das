@@ -428,6 +428,85 @@ rocm_nanobind_extension(
 )
 
 cc_library(
+    name = "hip_miopen_mha_kernel",
+    srcs = ["//jaxlib/gpu:miopen_mha_kernel.cc"],
+    hdrs = ["//jaxlib/gpu:miopen_mha_kernel.h"],
+    deps = [
+        ":hip_gpu_kernel_helpers",
+        ":hip_vendor",
+        "//jaxlib:kernel_helpers",
+        "//jaxlib/gpu:handle_pool",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings:str_format",
+        "@com_google_absl//absl/synchronization",
+        "@local_config_rocm//rocm:hip_runtime",
+        "@local_config_rocm//rocm:miopen",
+        "@local_config_rocm//rocm:rocm_headers",
+        "@xla//xla/service:custom_call_status",
+    ],
+)
+
+rocm_nanobind_extension(
+    name = "miopen_mha",
+    srcs = ["//jaxlib/gpu:miopen_mha.cc"],
+    copts = [
+        "-fexceptions",
+        "-fno-strict-aliasing",
+    ],
+    enable_stub_generation = False,
+    features = ["-use_header_modules"],
+    module_name = "miopen_mha",
+    deps = [
+        ":hip_miopen_mha_kernel",
+        ":hip_vendor",
+        "//jaxlib:absl_status_casters",
+        "//jaxlib:kernel_nanobind_helpers",
+        "@local_config_rocm//rocm:miopen",
+        "@local_config_rocm//rocm:rocm_headers",
+        "@nanobind",
+    ],
+)
+
+cc_library(
+    name = "hip_cutlass_fa_kernel",
+    srcs = ["//jaxlib/gpu:cutlass_fa_kernel.cc"],
+    hdrs = ["//jaxlib/gpu:cutlass_fa_kernel.h"],
+    deps = [
+        ":hip_gpu_kernel_helpers",
+        ":hip_vendor",
+        "//jaxlib:kernel_helpers",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings:str_format",
+        "@local_config_rocm//rocm:hip_runtime",
+        "@local_config_rocm//rocm:rocm_headers",
+        "@xla//xla/service:custom_call_status",
+    ],
+)
+
+rocm_nanobind_extension(
+    name = "cutlass_fa",
+    srcs = ["//jaxlib/gpu:cutlass_fa.cc"],
+    copts = [
+        "-fexceptions",
+        "-fno-strict-aliasing",
+    ],
+    enable_stub_generation = False,
+    features = ["-use_header_modules"],
+    linkopts = ["-ldl"],
+    module_name = "cutlass_fa",
+    deps = [
+        ":hip_cutlass_fa_kernel",
+        ":hip_vendor",
+        "//jaxlib:absl_status_casters",
+        "//jaxlib:kernel_nanobind_helpers",
+        "@local_config_rocm//rocm:rocm_headers",
+        "@nanobind",
+    ],
+)
+
+cc_library(
     name = "triton_kernels",
     srcs = ["//jaxlib/gpu:triton_kernels.cc"],
     hdrs = ["//jaxlib/gpu:triton_kernels.h"],
@@ -508,6 +587,8 @@ py_library(
         ":_solver",
         ":_sparse",
         ":_triton",
+        ":cutlass_fa",
+        ":miopen_mha",
     ],
 )
 

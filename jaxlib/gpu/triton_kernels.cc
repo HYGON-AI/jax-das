@@ -774,9 +774,14 @@ jax_triton::TritonAutotunedKernelCall AutotunedKernelCall::ToProto() const {
 
   // Restore aliased inputs to their original values.
   for (const auto& [input_idx, input_copy] : input_copies) {
+#ifdef JAX_GPU_HIP
+    void* input_copy_data = const_cast<unsigned char*>(input_copy.data());
+#else
+    const void* input_copy_data = input_copy.data();
+#endif
     GPU_RETURN_IF_ERROR(
         gpuMemcpyHtoDAsync(reinterpret_cast<gpuDevicePtr_t>(buffers[input_idx]),
-                           input_copy.data(), input_copy.size(), stream));
+                           input_copy_data, input_copy.size(), stream));
   }
 
   // Synchronize stream to ensure copies are complete before the host copy
