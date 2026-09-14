@@ -27,9 +27,8 @@ ROCM_CODEGEN_CONFIG="hcu"
 while (($#)); do
   case "$1" in
     -h|--help)
-      echo "Usage: $0 [--hcu|--gcvm]"
-      echo "  --hcu   Build with DTK HCU ROCm codegen backend (default)."
-      echo "  --gcvm  Build with DTK GCVM ROCm codegen backend."
+      echo "Usage: $0 [--hcu]"
+      echo "  --hcu   Build with HCU ROCm codegen backend (default)."
       echo
       echo "Environment overrides:"
       echo "  JAX_DIR     JAX source tree. Defaults to this script directory."
@@ -41,15 +40,13 @@ while (($#)); do
       echo "              Wheel local version suffix. Defaults to +das.opt1.dtk2604."
       exit 0
       ;;
-    --gcvm)
-      ROCM_CODEGEN_CONFIG="gcvm"
       ;;
     --hcu)
       ROCM_CODEGEN_CONFIG="hcu"
       ;;
     *)
       echo "Unknown argument: $1" >&2
-      echo "Usage: $0 [--hcu|--gcvm]" >&2
+      echo "Usage: $0 [--hcu]" >&2
       exit 2
       ;;
   esac
