@@ -1,5 +1,9 @@
 # Copyright 2023 The JAX Authors.
 #
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# SPDX-License-Identifier: Apache-2.0
+# Modified by Hygon Information Technology Co., Ltd., 2026.
+#
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -16,11 +20,6 @@
 # run via bazel run as part of the jax cuda plugin build process.
 
 # Most users should not run this script directly; use build.py instead.
-
-# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
-# SPDX-License-Identifier: Apache-2.0
-# Modified by Hygon Information Technology Co., Ltd., 2026.
-
 
 import argparse
 import functools
