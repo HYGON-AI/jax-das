@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 JAX_DIR="${JAX_DIR:-${ROOT_DIR}}"
 # Keep JAX and XLA as sibling source trees by default:
 #   /path/to/work/jax
@@ -39,7 +39,6 @@ while (($#)); do
       echo "  DTK_WHEEL_VERSION_SUFFIX"
       echo "              Wheel local version suffix. Defaults to +das.opt1.dtk2604."
       exit 0
-      ;;
       ;;
     --hcu)
       ROCM_CODEGEN_CONFIG="hcu"

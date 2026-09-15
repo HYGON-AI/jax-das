@@ -2,7 +2,7 @@
 set -eo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT_DIR="${ROOT_DIR:-${SCRIPT_DIR}}"
+ROOT_DIR="${ROOT_DIR:-${SCRIPT_DIR}/..}"
 DTK_DIR="${DTK_DIR:-/opt/dtk}"
 PYTHON_BIN="${PYTHON_BIN:-python3.11}"
 TEST_ROOT="${TEST_ROOT:-${ROOT_DIR}/tests}"

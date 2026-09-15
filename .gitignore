@@ -6,14 +6,11 @@
 /build/bazel*
 /build/__editable__.jax-*
 /dist/
-/test_logs/
 .ipynb_checkpoints
 /bazel-*
 MODULE.bazel.lock
 .jax_configure.bazelrc
 /tensorflow
-/xla/
-/xla-jax-0.10.0/
 .DS_Store
 .mypy_cache/
 .pytype/

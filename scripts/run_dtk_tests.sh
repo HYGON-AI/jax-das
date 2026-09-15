@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DTK_DIR="${DTK_DIR:-/opt/dtk}"
 PYTHON_BIN="${PYTHON_BIN:-python3.11}"
 WHEEL_DIR="${WHEEL_DIR:-${ROOT_DIR}/dist}"
@@ -18,7 +18,7 @@ TEST_REQUIREMENTS="${TEST_REQUIREMENTS:-${ROOT_DIR}/build/test-requirements.txt}
 usage() {
   cat <<EOF
 Usage:
-  ./run_dtk_tests.sh [test_file_or_dir ...]
+  ./scripts/run_dtk_tests.sh [test_file_or_dir ...]
 
 Runs JAX pytest files one by one from /tmp, keeps going after failures, and
 writes logs under test_logs/<run_name>.
@@ -34,9 +34,9 @@ Common environment overrides:
   EXIT_NONZERO_ON_FAILURE=0
 
 Examples:
-  ./run_dtk_tests.sh
-  ./run_dtk_tests.sh tests/nn_test.py tests/lax_numpy_test.py
-  PYTEST_ARGS="-k dot_product_attention" ./run_dtk_tests.sh tests/nn_test.py
+  ./scripts/run_dtk_tests.sh
+  ./scripts/run_dtk_tests.sh tests/nn_test.py tests/lax_numpy_test.py
+  PYTEST_ARGS="-k dot_product_attention" ./scripts/run_dtk_tests.sh tests/nn_test.py
 EOF
 }
 
