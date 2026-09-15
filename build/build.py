@@ -648,6 +648,9 @@ async def main():
     if args.rocm_amdgpu_targets:
       logging.debug("ROCm AMD GPU targets: %s", args.rocm_amdgpu_targets)
       wheel_build_command_base.append(
+          f"--repo_env=TF_ROCM_AMDGPU_TARGETS={args.rocm_amdgpu_targets}"
+      )
+      wheel_build_command_base.append(
           f"--action_env=TF_ROCM_AMDGPU_TARGETS={args.rocm_amdgpu_targets}"
       )
 

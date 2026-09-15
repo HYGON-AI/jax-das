@@ -47,8 +47,12 @@ class PgleTest(jtu.JaxTestCase):
 
   def setUp(self):
     super().setUp()
+    if os.environ.get("ROCM_PATH") or os.path.exists("/opt/dtk/.dtk_version"):
+      self.skipTest('PGLE profiling tests are not supported on ROCm/DTK')
     if not jtu.test_device_matches(["gpu"]):
       self.skipTest('Profile-guideded latency estimation only supported on GPU')
+    if jtu.is_device_rocm():
+      self.skipTest('PGLE profiling tests are not supported on ROCm')
 
     cc.set_cache_dir(None)
     cc.reset_cache()
