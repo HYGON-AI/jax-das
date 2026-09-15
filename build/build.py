@@ -271,7 +271,7 @@ def add_artifact_subcommand_arguments(parser: argparse.ArgumentParser):
   rocm_group.add_argument(
       "--rocm_amdgpu_targets",
       type=str,
-      default="gfx900,gfx906,gfx908,gfx90a,gfx940,gfx941,gfx942,gfx1030,gfx1100,gfx1200,gfx1201",
+      default="gfx906,gfx926,gfx928,gfx936,gfx938",
       help="A comma-separated list of ROCm HCU device targets to support.",
   )
 
