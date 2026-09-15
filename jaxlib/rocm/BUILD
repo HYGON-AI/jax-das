@@ -33,7 +33,10 @@ package(
 
 cc_library(
     name = "hip_vendor",
-    defines = ["JAX_GPU_HIP=1"],
+    defines = [
+        "JAX_GPU_HAVE_ROCSOLVER_GESDD=1",
+        "JAX_GPU_HIP=1",
+    ],
     textual_hdrs = [
         "//jaxlib/gpu:vendor.h",
     ],
