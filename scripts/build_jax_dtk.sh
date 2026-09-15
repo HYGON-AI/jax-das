@@ -34,7 +34,7 @@ while (($#)); do
       echo
       echo "Environment overrides:"
       echo "  JAX_DIR     JAX source tree. Defaults to this script directory."
-      echo "  XLA_DIR     XLA source tree. Defaults to ../xla relative to JAX_DIR."
+      echo "  XLA_DIR     XLA source tree. Defaults to ../xla-das relative to JAX_DIR."
       echo "  DTK_DIR     DTK installation. Defaults to /opt/dtk."
       echo "  AILLVM_DIR  HCU LLVM installation. Defaults to \${DTK_DIR}/aillvm."
       echo "  DTK_WHEEL_VERSION_SUFFIX"
@@ -102,7 +102,7 @@ echo "Wheel version suffix: ${DTK_WHEEL_VERSION_SUFFIX}"
 
 "${PYTHON_BIN}" build/build.py build \
   --wheels=jax,jaxlib,jax-rocm-plugin,jax-rocm-pjrt \
-  --python_version=3.12 \
+  --python_version=3.11 \
   --rocm_path="${DTK_DIR}" \
   --rocm_version=60 \
   --rocm_amdgpu_targets="${TARGETS}" \
