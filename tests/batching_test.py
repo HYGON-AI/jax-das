@@ -675,7 +675,7 @@ class BatchingTest(jtu.JaxTestCase):
 
   @parameterized.named_parameters(
       {"testcase_name": "_shape={}_axis={}_idxs={}_dnums={}_slice_sizes={}".format(
-          jtu.format_shape_dtype_string(shape, dtype), axis, idxs.tolist(), dnums,
+          jtu.format_shape_dtype_string(shape, dtype), axis, idxs, dnums,
           slice_sizes),
        "axis": axis, "shape": shape, "dtype": dtype, "idxs": idxs, "dnums": dnums,
        "slice_sizes": slice_sizes}
@@ -707,7 +707,7 @@ class BatchingTest(jtu.JaxTestCase):
 
   @parameterized.named_parameters(
       {"testcase_name": "_shape={}_axis={}_idxs={}_dnums={}_slice_sizes={}".format(
-          jtu.format_shape_dtype_string(shape, dtype), axis, idxs.tolist(), dnums,
+          jtu.format_shape_dtype_string(shape, dtype), axis, idxs, dnums,
           slice_sizes),
        "axis": axis, "shape": shape, "dtype": dtype, "idxs": idxs, "dnums": dnums,
        "slice_sizes": slice_sizes}
@@ -740,7 +740,7 @@ class BatchingTest(jtu.JaxTestCase):
 
   @parameterized.named_parameters(
       {"testcase_name": "_shape={}_axis={}_idxs={}_dnums={}_slice_sizes={}".format(
-          jtu.format_shape_dtype_string(shape, dtype), axis, idxs.tolist(), dnums,
+          jtu.format_shape_dtype_string(shape, dtype), axis, idxs, dnums,
           slice_sizes),
        "axis": axis, "shape": shape, "dtype": dtype, "idxs": idxs, "dnums": dnums,
        "slice_sizes": slice_sizes}
@@ -769,7 +769,7 @@ class BatchingTest(jtu.JaxTestCase):
 
   @parameterized.named_parameters(
       {"testcase_name": "_shape={}_axis={}_idxs={}_dnums={}_slice_sizes={}".format(
-          jtu.format_shape_dtype_string(shape, dtype), axis, idxs.tolist(), dnums,
+          jtu.format_shape_dtype_string(shape, dtype), axis, idxs, dnums,
           slice_sizes),
        "axis": axis, "shape": shape, "dtype": dtype, "idxs": idxs, "dnums": dnums,
        "slice_sizes": slice_sizes}
@@ -800,7 +800,7 @@ class BatchingTest(jtu.JaxTestCase):
   @parameterized.named_parameters(
       {"testcase_name": "_shape={}_op_axis={}_idxs_axis={}_idxs={}_dnums={}_slice_sizes={}".format(
           jtu.format_shape_dtype_string(shape, dtype), op_axis, idxs_axis,
-          idxs.tolist(),
+          idxs,
           dnums, slice_sizes),
        "op_axis": op_axis, "idxs_axis": idxs_axis, "shape": shape, "dtype":
        dtype, "idxs": idxs, "dnums": dnums, "slice_sizes": slice_sizes}
@@ -838,7 +838,7 @@ class BatchingTest(jtu.JaxTestCase):
   @parameterized.named_parameters(
       {"testcase_name": "_shape={}_op_axis={}_idxs_axis={}_idxs={}_dnums={}_slice_sizes={}".format(
           jtu.format_shape_dtype_string(shape, dtype), op_axis, idxs_axis,
-          idxs.tolist(),
+          idxs,
           dnums, slice_sizes),
        "op_axis": op_axis, "idxs_axis": idxs_axis, "shape": shape, "dtype":
        dtype, "idxs": idxs, "dnums": dnums, "slice_sizes": slice_sizes}
