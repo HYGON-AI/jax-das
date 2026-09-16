@@ -1,5 +1,9 @@
 # Copyright 2018 The JAX Authors.
 #
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# SPDX-License-Identifier: Apache-2.0
+# Modified by Hygon Information Technology Co., Ltd., 2026.
+#
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -1433,6 +1437,16 @@ def solve(a: ArrayLike, b: ArrayLike) -> Array:
 
   signature = "(m,m),(m)->(m)" if b.ndim == 1 else "(m,m),(m,n)->(m,n)"
   a, b = core.standard_insert_pvary(a, b)
+
+  # rocBLAS trsm_batched collapses at exactly one right-hand-side column at n=1.
+  # Padding does not change the answer at the algorithm level.
+  # Triangular-solve columns are mathematically independent.
+  if (config.pad_solve_rhs.value and b.ndim >= 3
+      and b.shape[-1] == 1 and b.shape[-2] == a.shape[-1]):
+    b = jnp.concatenate([b, array_creation.zeros_like(b)], axis=-1)
+    out = jnp.vectorize(lax_linalg._solve, signature=signature)(a, b)
+    return out[..., :1]
+
   return jnp.vectorize(lax_linalg._solve, signature=signature)(a, b)
 
 

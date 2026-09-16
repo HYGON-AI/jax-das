@@ -1,5 +1,9 @@
 # Copyright 2018 The JAX Authors.
 #
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# SPDX-License-Identifier: Apache-2.0
+# Modified by Hygon Information Technology Co., Ltd., 2026.
+#
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -2093,6 +2097,17 @@ gpu_use_magma = enum_state(
         'See the documentation for lax.linalg.eig for more details about how '
         'to use this feature.'
     ),
+)
+
+pad_solve_rhs = bool_state(
+    name='jax_pad_solve_rhs',
+    default=False,
+    help=(
+        'Pad a one-column right-hand side to two columns in jnp.linalg.solve, '
+        'then slice the padding back off. Works around rocBLAS trsm_batched. '
+        'Off by default.'
+    ),
+    include_in_jit_key=True,
 )
 
 exec_time_optimization_effort = float_state(

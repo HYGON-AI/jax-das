@@ -1,3 +1,26 @@
+<!-- DAS-INTRO:BEGIN -->
+
+> [!IMPORTANT]
+> **jax-das** 是面向 DAS 架构的 jax 下游适配发行版，
+> 本项目基于 [ROCm/jax](https://github.com/ROCm/jax) 的 `rocm-jaxlib-v0.10.0`（`a9bf75e1b21f7507099d868fdf8645e2792bfd68`）基线构建并集成 DAS 支持。
+> 本项目不是 jax 官方发行版，而是基于[ROCm/jax](https://github.com/ROCm/jax/tree/rocm-jaxlib-v0.10.0) 二次开发；ROCm jax 源自[jax-ml/jax](https://github.com/jax-ml/jax/tree/jax-v0.10.0)二次开发。
+
+* **目标架构：** jax
+* **上游版本：** rocm-jaxlib-v0.10.0
+* **上游基线：** `https://github.com/ROCm/jax/tree/a9bf75e1b21f7507099d868fdf8645e2792bfd68`
+* **源码编译：** [BUILDING.md](docs/das/BUILDING.md)
+* **已知问题：** [BUILDING.md 中的已知问题](docs/das/BUILDING.md#已知问题)
+* **Python 发布包名：** `jax-das`
+* **Python 导入名：** `jax`
+* **上游许可证：** Apache-2.0
+* **第三方许可信息：** [THIRD_PARTY_NOTICES.md](docs/das/THIRD_PARTY_NOTICES.md)
+
+> `jax-das` 与上游 `jax` 会安装同名 `jax` 模块，
+> 请勿在同一虚拟环境或容器中混装。
+> 本项目由 Hygon Information Technology Co., Ltd. 修改并维护。
+
+<!-- DAS-INTRO:END -->
+
 <div align="center">
 <img src="https://raw.githubusercontent.com/jax-ml/jax/main/images/jax_logo_250px.png" alt="logo"></img>
 </div>
