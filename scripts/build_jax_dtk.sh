@@ -19,7 +19,8 @@ DTK_DIR="${DTK_DIR:-/opt/dtk}"
 AILLVM_DIR="${AILLVM_DIR:-${DTK_DIR}/aillvm}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 OUT_DIR="${OUT_DIR:-${ROOT_DIR}/dist}"
-DTK_WHEEL_VERSION_SUFFIX="${DTK_WHEEL_VERSION_SUFFIX:-+das.opt1.dtk2604}"
+DTK_VERSION="${DTK_VERSION:-26.04}"
+DTK_WHEEL_VERSION_SUFFIX="${DTK_WHEEL_VERSION_SUFFIX:-+das.opt1.dtk$(printf '%s' "${DTK_VERSION}" | tr -d '.')}"
 # DTK HIP/DCC 25.10 accepts these targets for precompiled plugin kernels.
 # gfx92a is still allowed in XLA runtime codegen, but hipcc rejects it
 # as a build target in this DTK release.
@@ -98,6 +99,7 @@ echo "ROCm codegen config: ${ROCM_CODEGEN_CONFIG}"
 echo "JAX source: ${JAX_DIR}"
 echo "XLA source: ${XLA_DIR}"
 echo "LLVM toolchain: ${AILLVM_DIR}"
+echo "DTK version: ${DTK_VERSION}"
 echo "Wheel version suffix: ${DTK_WHEEL_VERSION_SUFFIX}"
 
 "${PYTHON_BIN}" build/build.py build \
