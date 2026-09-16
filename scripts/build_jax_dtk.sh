@@ -9,6 +9,11 @@ JAX_DIR="${JAX_DIR:-${ROOT_DIR}}"
 # Keep JAX and XLA as sibling source trees by default:
 #   /path/to/work/jax
 #   /path/to/work/xla
+# The DAS XLA fork is fetched automatically when XLA_DIR is absent, so building
+# only needs the jax-das checkout. Override XLA_REPO / XLA_REF for another mirror
+# (for example the internal GitLab), or set XLA_DIR to use an existing tree.
+XLA_REPO="${XLA_REPO:-https://github.com/ljw-LiXiaoBai/xla-das.git}"
+XLA_REF="${XLA_REF:-dev}"
 if [[ -z "${XLA_DIR:-}" ]]; then
   XLA_DIR="../xla-das"
   XLA_DIR_FROM_DEFAULT=1
@@ -19,7 +24,8 @@ DTK_DIR="${DTK_DIR:-/opt/dtk}"
 AILLVM_DIR="${AILLVM_DIR:-${DTK_DIR}/aillvm}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 OUT_DIR="${OUT_DIR:-${ROOT_DIR}/dist}"
-DTK_WHEEL_VERSION_SUFFIX="${DTK_WHEEL_VERSION_SUFFIX:-+das.opt1.dtk2604}"
+DTK_VERSION="${DTK_VERSION:-26.04}"
+DTK_WHEEL_VERSION_SUFFIX="${DTK_WHEEL_VERSION_SUFFIX:-+das.opt1.dtk$(printf '%s' "${DTK_VERSION}" | tr -d '.')}"
 # DTK HIP/DCC 25.10 accepts these targets for precompiled plugin kernels.
 # gfx92a is still allowed in XLA runtime codegen, but hipcc rejects it
 # as a build target in this DTK release.
@@ -98,7 +104,14 @@ echo "ROCm codegen config: ${ROCM_CODEGEN_CONFIG}"
 echo "JAX source: ${JAX_DIR}"
 echo "XLA source: ${XLA_DIR}"
 echo "LLVM toolchain: ${AILLVM_DIR}"
+echo "DTK version: ${DTK_VERSION}"
 echo "Wheel version suffix: ${DTK_WHEEL_VERSION_SUFFIX}"
+# Bazel may reuse cached Triton from previous builds.
+# Remove stale Triton cache to make sure xla-das Triton patches are applied.
+echo "Cleaning stale Bazel Triton cache..."
+triton_cache_dirs=("${HOME:-/root}"/.cache/bazel/_bazel_"$(id -un)"/*/external/triton*)
+[[ -e "${triton_cache_dirs[0]}" ]] && rm -rf "${triton_cache_dirs[@]}" || echo "No stale Triton cache found."
+
 
 "${PYTHON_BIN}" build/build.py build \
   --wheels=jax,jaxlib,jax-rocm-plugin,jax-rocm-pjrt \

@@ -1279,7 +1279,7 @@ def dot_product_attention(
       )
       out = dpa_impl(
           query_arr, key_arr, value_arr, bias, mask, query_seq_lengths,
-          key_value_seq_lengths, scale=scale_val, mask_type=mask_type,
+          key_value_seq_lengths, scale=scale_val, mask_type=mask_type, # type: ignore
           sliding_window_length=sliding_window,
       )
     case None:
