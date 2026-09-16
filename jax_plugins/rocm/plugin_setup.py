@@ -57,7 +57,7 @@ setup(
     name=project_name,
     version=__version__,
     cmdclass=_cmdclass,
-    description=f"JAX Plugin for AMD GPUs (ROCm:{rocm_detected_version})",
+    description=f"JAX Plugin for HCU devices (ROCm:{rocm_detected_version})",
     long_description="",
     long_description_content_type="text/markdown",
     author="ROCm JAX Devs",

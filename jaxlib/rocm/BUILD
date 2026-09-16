@@ -23,6 +23,7 @@ load(
     "rocm_library",
 )
 load("//jaxlib/rocm:rocm_rpath.bzl", "rocm_nanobind_extension")
+load("//jaxlib/rocm:rocm_version.bzl", "HAVE_ROCSOLVER_GESDD")
 
 licenses(["notice"])
 
@@ -34,7 +35,7 @@ package(
 cc_library(
     name = "hip_vendor",
     defines = [
-        "JAX_GPU_HAVE_ROCSOLVER_GESDD=1",
+        "JAX_GPU_HAVE_ROCSOLVER_GESDD=" + HAVE_ROCSOLVER_GESDD,
         "JAX_GPU_HIP=1",
     ],
     textual_hdrs = [

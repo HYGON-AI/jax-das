@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # Copyright 2022 The JAX Authors.
 #
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# SPDX-License-Identifier: Apache-2.0
+# Modified by Hygon Information Technology Co., Ltd., 2026.
+#
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -20,17 +24,24 @@ set -euxo pipefail
 LOG_DIR="./logs"
 
 # --------------------------------------------------------------------------------
-# Function to detect number of AMD/ATI GPUs using lspci.
+# Function to detect number of HCU devices using hy-smi.
 # --------------------------------------------------------------------------------
-detect_amd_gpus() {
-    # Make sure lspci is installed.
-    if ! command -v lspci &>/dev/null; then
-        echo "Error: lspci command not found. Aborting."
+detect_hcu_devices() {
+    # Make sure hy-smi is installed.
+    if ! command -v hy-smi &>/dev/null; then
+        echo "Error: hy-smi command not found. Aborting." >&2
         exit 1
     fi
-    # Count AMD/ATI GPU controllers.
+
+    local smi_output
+    if ! smi_output=$(hy-smi 2>/dev/null); then
+        echo "Error: hy-smi failed to query the HCU devices. Aborting." >&2
+        exit 1
+    fi
+
+    # Count the HCU device rows.
     local count
-    count=$(lspci | grep -c 'controller.*AMD/ATI')
+    count=$(echo "$smi_output" | grep -cE '^[[:space:]]*[0-9]+[[:space:]]' || true)
     echo "$count"
 }
 
@@ -72,10 +83,10 @@ run_tests() {
 # Main entry point.
 # --------------------------------------------------------------------------------
 main() {
-    # Detect number of AMD/ATI GPUs.
+    # Detect number of HCU devices.
     local gpu_count
-    gpu_count=$(detect_amd_gpus)
-    echo "Number of AMD/ATI GPUs detected: $gpu_count"
+    gpu_count=$(detect_hcu_devices)
+    echo "Number of HCU devices detected: $gpu_count"
 
     # Decide how many GPUs to enable based on count.
     if [[ "$gpu_count" -ge 8 ]]; then

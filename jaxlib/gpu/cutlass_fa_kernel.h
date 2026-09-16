@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+// SPDX-License-Identifier: Apache-2.0
+
 #ifndef JAXLIB_GPU_CUTLASS_FA_KERNEL_H_
 #define JAXLIB_GPU_CUTLASS_FA_KERNEL_H_
 #include <cmath>

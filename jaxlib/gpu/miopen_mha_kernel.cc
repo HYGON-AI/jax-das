@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+// SPDX-License-Identifier: Apache-2.0
+
 #include "jaxlib/gpu/miopen_mha_kernel.h"
 #include "jaxlib/gpu/gpu_kernel_helpers.h"
 #include "jaxlib/kernel_helpers.h"
