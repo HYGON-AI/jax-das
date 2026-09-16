@@ -9,6 +9,11 @@ JAX_DIR="${JAX_DIR:-${ROOT_DIR}}"
 # Keep JAX and XLA as sibling source trees by default:
 #   /path/to/work/jax
 #   /path/to/work/xla
+# The DAS XLA fork is fetched automatically when XLA_DIR is absent, so building
+# only needs the jax-das checkout. Override XLA_REPO / XLA_REF for another mirror
+# (for example the internal GitLab), or set XLA_DIR to use an existing tree.
+XLA_REPO="${XLA_REPO:-https://github.com/ljw-LiXiaoBai/xla-das.git}"
+XLA_REF="${XLA_REF:-dev}"
 if [[ -z "${XLA_DIR:-}" ]]; then
   XLA_DIR="../xla-das"
   XLA_DIR_FROM_DEFAULT=1

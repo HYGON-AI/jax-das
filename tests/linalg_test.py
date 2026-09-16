@@ -2175,7 +2175,7 @@ class ScipyLinalgTest(jtu.JaxTestCase):
 
     if (dtype == np.int8 
         and jtu.test_device_matches(["rocm"])):
-      self.skipTest("int8 toeplitz is not supported on ROCm.")
+      self.skipTest("int8 toeplitz is not supported on DTK.")
       
     rng = jtu.rand_default(self.rng())
     args_maker = lambda: [rng(cshape, cdtype), rng(rshape, rdtype)]
