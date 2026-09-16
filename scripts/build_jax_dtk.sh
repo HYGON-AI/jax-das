@@ -104,7 +104,9 @@ echo "Wheel version suffix: ${DTK_WHEEL_VERSION_SUFFIX}"
 # Bazel may reuse cached Triton from previous builds.
 # Remove stale Triton cache to make sure xla-das Triton patches are applied.
 echo "Cleaning stale Bazel Triton cache..."
-rm -rf /root/.cache/bazel/_bazel_root/*/external/triton*
+triton_cache_dirs=("${HOME:-/root}"/.cache/bazel/_bazel_"$(id -un)"/*/external/triton*)
+[[ -e "${triton_cache_dirs[0]}" ]] && rm -rf "${triton_cache_dirs[@]}" || echo "No stale Triton cache found."
+
 
 "${PYTHON_BIN}" build/build.py build \
   --wheels=jax,jaxlib,jax-rocm-plugin,jax-rocm-pjrt \
