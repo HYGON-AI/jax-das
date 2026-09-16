@@ -2173,10 +2173,6 @@ class ScipyLinalgTest(jtu.JaxTestCase):
         and jtu.test_device_matches(["gpu"])):
       self.skipTest("Integer (except int8) toeplitz is not supported on GPU yet.")
 
-    if (dtype == np.int8 
-        and jtu.test_device_matches(["rocm"])):
-      self.skipTest("int8 toeplitz is not supported on DTK.")
-      
     rng = jtu.rand_default(self.rng())
     args_maker = lambda: [rng(cshape, cdtype), rng(rshape, rdtype)]
     with jax.numpy_rank_promotion("allow"):
@@ -2197,6 +2193,10 @@ class ScipyLinalgTest(jtu.JaxTestCase):
     if (dtype in int_types_excl_i8
         and jtu.test_device_matches(["gpu"])):
       self.skipTest("Integer (except int8) toeplitz is not supported on GPU yet.")
+
+    if (dtype == np.int8
+        and jtu.test_device_matches(["rocm"])):
+      self.skipTest("int8 toeplitz is not supported on DTK.")
 
     rng = jtu.rand_default(self.rng())
     args_maker = lambda: [rng(shape, dtype)]
