@@ -1190,8 +1190,8 @@ def _pallas_call_lowering(
 
     if is_rocm and backend is mosaic_gpu_backend:
       raise ValueError(
-        "Mosaic GPU does not yet support HCU/ROCm devices. "
-        "Use ``compiler_params=pltriton.CompilerParams()`` for ROCm."
+          "Mosaic GPU does not yet support HCU/ROCm devices. "
+          "Use ``compiler_params=pltriton.CompilerParams()`` for ROCm."
       )
 
     return backend.pallas_call_lowering(
