@@ -542,6 +542,7 @@ def _dot_product_attention_bwd_cuda_lowering(
   )
   # {Q, K, V, activation, dO, bias*, O, q_seqlen*, kv_seqlen*}
   # {dQ, dK, dV, dbias*, workspace}
+  has_dropout = dropout_rate > 0
   has_bias, has_dbias = variadic_args
   # create operands
   operands = [query, key, value, activation, grad_output]
@@ -572,7 +573,7 @@ def _dot_product_attention_bwd_cuda_lowering(
   result_types.append(ir.RankedTensorType.get(workspace_shape, workspace_type))
   result_layouts = result_layouts + default_layouts(workspace_shape)
   out = mlir.custom_call(
-    "cutlass_fa_bwd_kernel",
+    b"cutlass_fa_bwd_kernel",
     result_types=result_types,
     operands=operands,
     backend_config=backend_config,
@@ -800,11 +801,7 @@ def _infer_bwd_output_sharding(mesh, arg_shapes, variadic_args):
   grad_value_sharding = NamedSharding(mesh, PartitionSpec(*key_spec))
   out_shardings = [grad_query_sharding, grad_key_sharding, grad_value_sharding]
   if has_dbias:
-    grad_bias_sharding = (
-      NamedSharding(mesh, PartitionSpec(*bias_spec))
-      if bias_spec is not None
-      else None
-    )
+    grad_bias_sharding = NamedSharding(mesh, PartitionSpec(*bias_spec))
     out_shardings = out_shardings + [grad_bias_sharding]
   return out_shardings
 
