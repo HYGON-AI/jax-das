@@ -8,6 +8,8 @@
 * **目标架构：** jax
 * **上游版本：** rocm-jaxlib-v0.10.0
 * **上游基线：** `https://github.com/ROCm/jax/tree/a9bf75e1b21f7507099d868fdf8645e2792bfd68`
+* **源码编译：** [BUILDING.md](docs/das/BUILDING.md)
+* **已知问题：** [BUILDING.md 中的已知问题](docs/das/BUILDING.md#已知问题)
 * **Python 发布包名：** `jax-das`
 * **Python 导入名：** `jax`
 * **上游许可证：** Apache-2.0

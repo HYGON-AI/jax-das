@@ -14,12 +14,13 @@
 
 # buildifier: disable=module-docstring
 
+# XLA is pinned to the DAS fork (https://github.com/HYGON-AI/xla-das).
 # To update XLA to a new revision,
 # a) update XLA_COMMIT to the new git commit hash
 # b) get the sha256 hash of the commit by running:
-#    curl -L https://github.com/openxla/xla/archive/{git_hash}.tar.gz | sha256sum
+#    curl -L https://github.com/HYGON-AI/xla-das/archive/{git_hash}.tar.gz | sha256sum
 #    and update XLA_SHA256 with the result.
 
 # buildifier: disable=module-docstring
-XLA_COMMIT = "76282465a00b54ddcef59a2ee95412cd5ecf5551"
-XLA_SHA256 = "c1386a56a09f7cfeaa10070b7299a59e040b492fbe80ddc27400b881df75c72d"
+XLA_COMMIT = "af6d0e11fa91b30e917fc08039989aec2d9ef692"
+XLA_SHA256 = "e2f0754a4d2e0e4ae242365184e4aa9fda57db8abde489f174eb3556b1d51fe2"

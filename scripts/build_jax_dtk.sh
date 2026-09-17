@@ -6,20 +6,9 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 JAX_DIR="${JAX_DIR:-${ROOT_DIR}}"
-# Keep JAX and XLA as sibling source trees by default:
-#   /path/to/work/jax
-#   /path/to/work/xla
-# The DAS XLA fork is fetched automatically when XLA_DIR is absent, so building
-# only needs the jax-das checkout. Override XLA_REPO / XLA_REF for another mirror
-# (for example the internal GitLab), or set XLA_DIR to use an existing tree.
-XLA_REPO="${XLA_REPO:-https://github.com/ljw-LiXiaoBai/xla-das.git}"
-XLA_REF="${XLA_REF:-dev}"
-if [[ -z "${XLA_DIR:-}" ]]; then
-  XLA_DIR="../xla-das"
-  XLA_DIR_FROM_DEFAULT=1
-else
-  XLA_DIR_FROM_DEFAULT=0
-fi
+# The DAS XLA fork is pinned in third_party/xla/revision.bzl and fetched by Bazel
+# as an external repository, so building only needs the jax-das checkout.
+# Set XLA_DIR to a local XLA tree to override the pinned revision (development).
 DTK_DIR="${DTK_DIR:-/opt/dtk}"
 AILLVM_DIR="${AILLVM_DIR:-${DTK_DIR}/aillvm}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
@@ -40,7 +29,8 @@ while (($#)); do
       echo
       echo "Environment overrides:"
       echo "  JAX_DIR     JAX source tree. Defaults to this script directory."
-      echo "  XLA_DIR     XLA source tree. Defaults to ../xla-das relative to JAX_DIR."
+      echo "  XLA_DIR     Local XLA source tree, overriding the pinned revision"
+      echo "              in third_party/xla/revision.bzl. Optional."
       echo "  DTK_DIR     DTK installation. Defaults to /opt/dtk."
       echo "  AILLVM_DIR  HCU LLVM installation. Defaults to \${DTK_DIR}/aillvm."
       echo "  DTK_WHEEL_VERSION_SUFFIX"
@@ -69,22 +59,18 @@ if [[ "${JAX_DIR}" != /* ]]; then
 fi
 JAX_DIR="$(cd "${JAX_DIR}" && pwd)"
 
-if [[ "${XLA_DIR}" != /* ]]; then
+if [[ -n "${XLA_DIR:-}" && "${XLA_DIR}" != /* ]]; then
   XLA_DIR="${JAX_DIR}/${XLA_DIR}"
 fi
-if [[ ! -d "${XLA_DIR}" && "${XLA_DIR_FROM_DEFAULT}" == 1 ]]; then
-  LEGACY_XLA_DIR="${JAX_DIR}/../xla-jax-0.10.0"
-  if [[ -d "${LEGACY_XLA_DIR}" ]]; then
-    XLA_DIR="${LEGACY_XLA_DIR}"
+if [[ -n "${XLA_DIR:-}" ]]; then
+  if [[ ! -d "${XLA_DIR}" ]]; then
+    echo "XLA source not found: ${XLA_DIR}" >&2
+    echo "Unset XLA_DIR to build against the pinned revision in" >&2
+    echo "third_party/xla/revision.bzl." >&2
+    exit 1
   fi
+  XLA_DIR="$(cd "${XLA_DIR}" && pwd)"
 fi
-if [[ ! -d "${XLA_DIR}" ]]; then
-  echo "XLA source not found: ${XLA_DIR}" >&2
-  echo "Set XLA_DIR=/path/to/xla if your XLA checkout is elsewhere." >&2
-  exit 1
-fi
-XLA_DIR="$(cd "${XLA_DIR}" && pwd)"
-
 
 if [[ ! -x "${AILLVM_DIR}/bin/clang" ]]; then
   echo "HCU LLVM clang not found: ${AILLVM_DIR}/bin/clang" >&2
@@ -102,7 +88,11 @@ cd "${JAX_DIR}"
 
 echo "ROCm codegen config: ${ROCM_CODEGEN_CONFIG}"
 echo "JAX source: ${JAX_DIR}"
-echo "XLA source: ${XLA_DIR}"
+if [[ -n "${XLA_DIR:-}" ]]; then
+  echo "XLA source: ${XLA_DIR} (override)"
+else
+  echo "XLA source: pinned revision from third_party/xla/revision.bzl"
+fi
 echo "LLVM toolchain: ${AILLVM_DIR}"
 echo "DTK version: ${DTK_VERSION}"
 echo "Wheel version suffix: ${DTK_WHEEL_VERSION_SUFFIX}"
@@ -112,6 +102,11 @@ echo "Cleaning stale Bazel Triton cache..."
 triton_cache_dirs=("${HOME:-/root}"/.cache/bazel/_bazel_"$(id -un)"/*/external/triton*)
 [[ -e "${triton_cache_dirs[0]}" ]] && rm -rf "${triton_cache_dirs[@]}" || echo "No stale Triton cache found."
 
+# Only override the pinned XLA revision when a local tree was requested.
+XLA_ARGS=()
+if [[ -n "${XLA_DIR:-}" ]]; then
+  XLA_ARGS+=("--local_xla_path=${XLA_DIR}")
+fi
 
 "${PYTHON_BIN}" build/build.py build \
   --wheels=jax,jaxlib,jax-rocm-plugin,jax-rocm-pjrt \
@@ -119,7 +114,7 @@ triton_cache_dirs=("${HOME:-/root}"/.cache/bazel/_bazel_"$(id -un)"/*/external/t
   --rocm_path="${DTK_DIR}" \
   --rocm_version=60 \
   --rocm_amdgpu_targets="${TARGETS}" \
-  --local_xla_path="${XLA_DIR}" \
+  ${XLA_ARGS[@]+"${XLA_ARGS[@]}"} \
   --clang_path="${AILLVM_DIR}/bin/clang" \
   --output_path="${OUT_DIR}" \
   --bazel_options="--repo_env=ML_WHEEL_TYPE=release" \

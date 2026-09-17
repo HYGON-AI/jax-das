@@ -20,18 +20,18 @@ def repo():
     tf_http_archive(
         name = "xla",
         sha256 = XLA_SHA256,
-        strip_prefix = "xla-{commit}".format(commit = XLA_COMMIT),
-        urls = tf_mirror_urls("https://github.com/ROCm/xla/archive/{commit}.tar.gz".format(commit = XLA_COMMIT)),
+        strip_prefix = "xla-das-{commit}".format(commit = XLA_COMMIT),
+        urls = tf_mirror_urls("https://github.com/HYGON-AI/xla-das/archive/{commit}.tar.gz".format(commit = XLA_COMMIT)),
         patch_file = [
             # Add any patch files here.
             # "//third_party/xla:temporary.patch
         ],
     )
 
-    # For development, one often wants to make changes to the TF repository as well
+    # For development, one often wants to make changes to the XLA repository as well
     # as the JAX repository. You can override the pinned repository above with a
     # local checkout by either:
-    # a) overriding the TF repository on the build.py command line by passing a flag
+    # a) overriding the XLA repository on the build.py command line by passing a flag
     #    like:
     #    python build/build.py build --local_xla_path=/path/to/xla
     #    or
