@@ -2383,7 +2383,7 @@ def _resolve_gpu_svd_implementation(
     if target_name_prefix != "hip":
       raise NotImplementedError(
           "Divide-and-conquer SVD (SvdAlgorithm.DIVIDE_AND_CONQUER) is only "
-          "supported on AMD (ROCm) GPUs, not on NVIDIA CUDA.")
+          "supported on HCU (ROCm) GPUs, not on NVIDIA CUDA.")
     return _GpuSvdImpl.GESDD
 
   if algorithm != SvdAlgorithm.DEFAULT:
