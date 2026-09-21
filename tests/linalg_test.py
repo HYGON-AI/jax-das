@@ -676,7 +676,7 @@ class NumpyLinalgTest(jtu.JaxTestCase):
 
     if (not jtu.is_device_rocm() and jtu.device_under_test() == "gpu"
         and algorithm == lax.linalg.SvdAlgorithm.DIVIDE_AND_CONQUER):
-      self.skipTest("Divide-and-conquer SVD only supported on AMD (ROCm) GPUs")
+      self.skipTest("Divide-and-conquer SVD only supported on HCU (ROCm) GPUs")
 
     if (
         jtu.test_device_matches(["cuda"])

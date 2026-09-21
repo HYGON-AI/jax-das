@@ -1,0 +1,199 @@
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Organization variables consumed below:
+#   BASE_COMPILE_IMAGE_ROCKY_PY311  base compile image, "<registry>/<repo>:<tag>"
+#   RESOURCE_SERVER_URL             server resources url
+#
+# Repository variables consumed below (all optional):
+#   HCU_PYTHON_BIN                  optional, default python3.11.
+#   HCU_XLA_DAS_REPO                optional, default HYGON-AI/xla-das
+#   HCU_XLA_DAS_REF                 optional, default jax/0.10.0-das (xla-das branch, not this repo's)
+#   HCU_DTK_VERSION                 optional, default 26.04. The tarball URL is derived from it.
+#   HCU_PIP_INDEX_URL               optional, default the TUNA PyPI mirror
+#
+# Repository secrets consumed below:
+#   XLA_DAS_READ_TOKEN              read-only token for the private HYGON-AI/xla-das
+#                                   repository. Required: the default GITHUB_TOKEN
+#                                   cannot read another private repository.
+
+name: CI HCU
+permissions:
+  contents: read
+on:
+  pull_request_target:
+    branches:
+      - v0.10.0-das
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - "jax/**"
+      - "jaxlib/**"
+      - "jax_plugins/**"
+      - "tests/**"
+      - "build/**"
+      - "scripts/**"
+      - "third_party/**"
+      - "MODULE.bazel"
+      - "WORKSPACE"
+      - ".bazelrc"
+      - ".github/workflows/hcu_ci.yml"
+  push:
+    branches:
+      - v0.10.0-das
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/v0.10.0-das' }}
+
+jobs:
+  manual_approval:
+    name: Manual Approval for CI
+    runs-on: ubuntu-latest
+    environment: ci-protection
+    if: ${{ github.event_name == 'pull_request_target' }}
+    steps:
+      - run: echo "Waiting for approval..."
+
+  jax:
+    name: JAX Linux x86 HCU
+    timeout-minutes: 720
+    needs: [manual_approval]
+    if: ${{ always() && (needs.manual_approval.result == 'success' || needs.manual_approval.result == 'skipped') }}
+    runs-on: [self-hosted, bw1100]
+    env:
+      DTK_VERSION: ${{ vars.HCU_DTK_VERSION || '26.04' }}
+      RESOURCE_SERVER_URL: ${{ vars.RESOURCE_SERVER_URL }}
+      PYTHON_BIN: ${{ vars.HCU_PYTHON_BIN || 'python3.11' }}
+      RUN_NAME: ci-${{ github.run_id }}
+    container:
+      image: ${{ vars.BASE_COMPILE_IMAGE_ROCKY_PY311 }}
+      volumes:
+        - /opt/hyhal:/opt/hyhal:ro
+      options: >-
+        --privileged
+        --user root
+        --device=/dev/kfd
+        --device=/dev/mkfd
+        --device=/dev/dri
+        --group-add video
+        --ipc=host
+        --shm-size=64G
+        --cap-add=SYS_PTRACE
+        --security-opt=seccomp=unconfined
+        --tmpfs /root/.cache/bazel:rw,exec,size=80g
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check Docker environment
+        run: |
+          if [ -f /.dockerenv ] || [ -f /run/.containerenv ] ||
+             grep -qaE '(docker|containerd|kubepods|libpod)' /proc/1/cgroup 2>/dev/null; then
+            echo "Docker environment detected on $(hostname), continue."
+          else
+            echo "::error::This job must run inside the HCU Docker container, but no Docker environment was detected on $(hostname). Aborting."
+            exit 1
+          fi
+
+      - name: Checking out jax-das
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.event.pull_request.number && format('refs/pull/{0}/head', github.event.pull_request.number) || github.sha }}
+          path: jax-das
+          persist-credentials: false
+
+      # xla-das is only needed to build: XLA_DIR below makes the build use
+      # --local_xla_path, so Bazel never downloads the tarball pinned in
+      # third_party/xla/revision.bzl, which is unreachable while the repository is private.
+      - name: Checking out xla-das
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: ${{ vars.HCU_XLA_DAS_REPO || 'HYGON-AI/xla-das' }}
+          ref: ${{ vars.HCU_XLA_DAS_REF || 'jax/0.10.0-das' }}
+          token: ${{ secrets.XLA_DAS_READ_TOKEN }}
+          path: xla-das
+          persist-credentials: false
+
+      - name: Install DTK, HCU LLVM, bazelisk and node
+        working-directory: jax-das
+        run: bash ci/setup_hcu_ci_env.sh
+
+      - name: Device info
+        run: |
+          lscpu
+          "${PYTHON_BIN}" -V
+          source /opt/dtk/env.sh
+          "${ROCM_PATH:-/opt/dtk}/bin/rocminfo"
+
+      - name: Configure pip index
+        env:
+          PIP_INDEX_URL: ${{ vars.HCU_PIP_INDEX_URL || 'https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple' }}
+        run: |
+          printf '[global]\nindex-url = %s\ntrusted-host = %s\ntimeout = 120\n' \
+            "${PIP_INDEX_URL}" "$(awk -F/ '{print $3}' <<<"${PIP_INDEX_URL}")" \
+            | tee /etc/pip.conf
+
+      - name: Build JAX wheels
+        timeout-minutes: 120
+        working-directory: jax-das
+        env:
+          XLA_DIR: ${{ github.workspace }}/xla-das
+          PYTHON_BIN: ${{ env.PYTHON_BIN }}
+        run: bash scripts/build_jax_dtk.sh
+
+      - name: Install JAX wheels and test dependencies
+        working-directory: jax-das
+        run: |
+          "${PYTHON_BIN}" -m pip install absl-py hypothesis flatbuffers ./dist/jax*.whl
+          "${PYTHON_BIN}" -m pip install --no-cache-dir -r build/test-requirements.txt
+          source /opt/dtk/env.sh
+          "${PYTHON_BIN}" -c 'import jax, jaxlib; print(jax.__version__, jaxlib.__version__)'
+
+      - name: Test JAX
+        timeout-minutes: 600
+        working-directory: jax-das
+        run: |
+          source /opt/dtk/env.sh
+          bash scripts/run_full_dtk_csv_tests.sh
+
+      # run_full_dtk_csv_tests.sh keeps going after failures and always exits 0,
+      # so the job result has to be derived from its summary.
+      - name: Check test results
+        working-directory: jax-das
+        run: |
+          summary="test_logs/${RUN_NAME}/summary.tsv"
+          if [[ ! -f "${summary}" ]]; then
+            echo "::error::Test summary not found: ${summary}"
+            exit 1
+          fi
+          total="$(( $(wc -l < "${summary}") - 1 ))"
+          if (( total == 0 )); then
+            echo "::error::No test files were executed."
+            exit 1
+          fi
+          failed="$(awk -F'\t' 'NR > 1 && $1 != "PASS"' "${summary}")"
+          if [[ -n "${failed}" ]]; then
+            echo "::error::$(printf '%s\n' "${failed}" | wc -l) test file(s) did not pass:"
+            printf '%s\n' "${failed}"
+            exit 1
+          fi
+          echo "All ${total} test files passed."
+
+      - name: Upload JAX test artifacts
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: jax-hcu-test-artifacts-${{ github.run_id }}
+          path: jax-das/test_logs/${{ env.RUN_NAME }}/
+          retention-days: 7
+
+      - name: Upload JAX wheels
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: jax-hcu-wheels-${{ github.run_id }}
+          path: jax-das/dist/
+          retention-days: 7

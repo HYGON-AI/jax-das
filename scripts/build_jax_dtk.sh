@@ -94,6 +94,7 @@ else
   echo "XLA source: pinned revision from third_party/xla/revision.bzl"
 fi
 echo "LLVM toolchain: ${AILLVM_DIR}"
+echo "Python: ${PYTHON_BIN} ($("${PYTHON_BIN}" -V 2>&1))"
 echo "DTK version: ${DTK_VERSION}"
 echo "Wheel version suffix: ${DTK_WHEEL_VERSION_SUFFIX}"
 # Bazel may reuse cached Triton from previous builds.
@@ -110,7 +111,6 @@ fi
 
 "${PYTHON_BIN}" build/build.py build \
   --wheels=jax,jaxlib,jax-rocm-plugin,jax-rocm-pjrt \
-  --python_version=3.11 \
   --rocm_path="${DTK_DIR}" \
   --rocm_version=60 \
   --rocm_amdgpu_targets="${TARGETS}" \
