@@ -253,6 +253,8 @@ class ProfilerTest(unittest.TestCase):
   @jtu.run_on_devices("gpu")
   @jtu.thread_unsafe_test()
   def testProgrammaticGpuCuptiTracing(self):
+    if jtu.is_device_rocm():
+      self.skipTest("DTK lacks rocprofiler-sdk")
     @jit
     def xy_plus_z(x, y, z):
       return jnp.float32(jax.lax.batch_matmul(jnp.bfloat16(x), y)) + z
@@ -274,6 +276,8 @@ class ProfilerTest(unittest.TestCase):
   @jtu.run_on_devices("gpu")
   @jtu.thread_unsafe_test()
   def testProgrammaticGpuCuptiTracingWithOptions(self):
+    if jtu.is_device_rocm():
+      self.skipTest("DTK lacks rocprofiler-sdk")
     @jit
     def xy_plus_z(x, y, z):
       return jnp.float32(jax.lax.batch_matmul(jnp.bfloat16(x), y)) + z
@@ -524,6 +528,8 @@ class ProfilerTest(unittest.TestCase):
   @jtu.thread_unsafe_test()
   def test_rocm_profiling(self):
     """Test that ROCm profiling captures GPU kernel events."""
+    if jtu.is_device_rocm():
+      self.skipTest("DTK lacks rocprofiler-sdk")
     with tempfile.TemporaryDirectory() as tmpdir:
       with jax.profiler.trace(tmpdir):
         # Test multiple matmul shapes
@@ -546,6 +552,8 @@ class ProfilerTest(unittest.TestCase):
   @jtu.thread_unsafe_test()
   def test_rocm_kernel_details_in_trace_json(self):
     """Test that ROCm profiling captures kernel_details in trace.json.gz."""
+    if jtu.is_device_rocm():
+      self.skipTest("DTK lacks rocprofiler-sdk")
     with tempfile.TemporaryDirectory() as tmpdir:
       with jax.profiler.trace(tmpdir):
         # Test multiple matmul shapes

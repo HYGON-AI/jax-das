@@ -30,6 +30,7 @@ from jax import scipy as jsp
 from jax._src import config
 from jax._src.lax import linalg as lax_linalg
 from jax._src.lib import cuda_versions
+from jax._src.lib import gpu_solver
 from jax._src.lib import version as jaxlib_version
 from jax._src import test_util as jtu
 from jax._src import xla_bridge
@@ -673,6 +674,17 @@ class NumpyLinalgTest(jtu.JaxTestCase):
 
     if jtu.is_device_rocm() and algorithm == lax.linalg.SvdAlgorithm.POLAR:
       self.skipTest("ROCM polar SVD not implemented")
+
+    # gesdd only exists in rocSOLVER from ROCm 7 (DTK 26.04.2) on; jaxlib gates
+    # the handler on JAX_GPU_HAVE_ROCSOLVER_GESDD (jaxlib/rocm/BUILD), so on a
+    # ROCm 6 (DTK 26.04) build hipsolver_gesdd_ffi is never registered. Empty
+    # inputs are lowered to _empty_svd and never reach the FFI call.
+    if (jtu.is_device_rocm()
+        and algorithm == lax.linalg.SvdAlgorithm.DIVIDE_AND_CONQUER
+        and m and n
+        and "hipsolver_gesdd_ffi" not in {
+            name for name, _, _ in gpu_solver.registrations().get("ROCM", ())}):
+      self.skipTest("Divide-and-conquer SVD needs rocSOLVER gesdd (ROCm 7+)")
 
     if (not jtu.is_device_rocm() and jtu.device_under_test() == "gpu"
         and algorithm == lax.linalg.SvdAlgorithm.DIVIDE_AND_CONQUER):
