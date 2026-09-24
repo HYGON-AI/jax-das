@@ -43,28 +43,16 @@ mpi:    5.0            bazel: 7.7.0
 ls /opt/hyhal   # 确认目录存在，编译与运行时都会用到
 ```
 
-### 源码与安装包信息
-
-#### jax-das
-
-| 项目 | 内容 |
-| --- | --- |
-| 仓库地址 | https://github.com/HYGON-AI/jax-das/tree/v0.10.0-das |
-| 分支 | `v0.10.0-das` |
-| 上游基线 Commit | `a9bf75e1b21f7507099d868fdf8645e2792bfd68` |
-
 ---
 
 ## 编译流程
 
-本节说明 jax-das 的手动编译流程，支持以下环境组合：
+本节说明 jax-das 的编译流程，支持以下环境组合：
 
 | OS | DTK_VERSION | PYTHON_VERSION |
 | --- | --- | --- |
 | ubuntu | 26.04 | 3.11 / 3.12 |
-| ubuntu | 26.04.2 | 3.11 / 3.12 |
 | rockylinux | 26.04 | 3.11 / 3.12 |
-| rockylinux | 26.04.2 | 3.11 / 3.12 |
 
 ### 1. 拉取基础镜像
 
@@ -73,7 +61,7 @@ ls /opt/hyhal   # 确认目录存在，编译与运行时都会用到
 | 环境 | 说明 |
 | --- | --- |
 | Ubuntu Python 3.11 | dev 镜像，不含 DTK |
-| Ubuntu Python 3.12 | dtk 镜像，自带 DTK 26.04；仅 DTK 26.04.2 需要再次覆盖安装 |
+| Ubuntu Python 3.12 | dtk 镜像，自带 DTK 26.04 |
 | RockyLinux | 镜像 tag 自带 Python 版本，随 `PYTHON_VERSION` 变化；不含 DTK |
 
 #### Ubuntu
@@ -118,8 +106,10 @@ docker run -it \
 --shm-size=16G \
 --group-add video \
 --device=/dev/kfd \
+--device=/dev/mkfd \
 --device=/dev/dri \
 --cap-add=SYS_PTRACE \
+--security-opt seccomp=unconfined \
 -v {宿主机工作目录}:{挂载目录} \
 -v /opt/hyhal:/opt/hyhal:ro \
 {image-name} /bin/bash
@@ -141,16 +131,6 @@ rm -rf dtk
 mv dtk-26.04 dtk
 ```
 
-DTK 26.04.2（临时压缩包，等待开源）：
-
-```text
-cp /public/dtk/DTK-26.04.2-weekly-0807-centos8-x86_64.tar.gz .
-tar -zxvf DTK-26.04.2-weekly-0807-centos8-x86_64.tar.gz -C /opt
-cd /opt
-rm -rf dtk
-mv dtk-26.04 dtk
-```
-
 #### Ubuntu
 
 DTK 26.04：
@@ -158,16 +138,6 @@ DTK 26.04：
 ```text
 wget https://download.sourcefind.cn:65024/file/1/DTK-26.04/Ubuntu22.04/DTK-26.04-Ubuntu22.04-x86_64.tar.gz
 tar -zxvf DTK-26.04-Ubuntu22.04-x86_64.tar.gz -C /opt
-cd /opt
-rm -rf dtk
-mv dtk-26.04 dtk
-```
-
-DTK 26.04.2（临时压缩包，等待开源）：
-
-```text
-cp /public/dtk/DTK-26.04.2-weekly-0731-ubuntu20.04-x86_64.tar.gz .
-tar -zxvf DTK-26.04.2-weekly-0731-ubuntu20.04-x86_64.tar.gz -C /opt
 cd /opt
 rm -rf dtk
 mv dtk-26.04 dtk
@@ -194,20 +164,16 @@ ls /opt/dtk/aillvm/bin/
 
 ### 5. 设置 Python 与 DTK 环境变量
 
-`PYTHON_VERSION` 需与实际使用的 Python 版本保持一致，该变量决定产出 wheel 的 `cp` 标签。
-
 Python 3.11：
 
 ```bash
-export PYTHON_BIN=python3
-export PYTHON_VERSION=3.11
+export PYTHON_BIN=python3.11
 ```
 
 Python 3.12：
 
 ```bash
-export PYTHON_BIN=python3
-export PYTHON_VERSION=3.12
+export PYTHON_BIN=python3.12
 ```
 
 `DTK_VERSION` 需与实际使用的 DTK 版本保持一致，该变量决定产出 wheel 的 `dtkversion` 标签。
@@ -216,12 +182,6 @@ DTK 26.04：
 
 ```bash
 export DTK_VERSION=26.04
-```
-
-DTK 26.04.2：
-
-```bash
-export DTK_VERSION=26.04.2
 ```
 
 ### 6. 编译 jax
@@ -241,10 +201,7 @@ git clone -b v0.10.0-das http://github.com/HYGON-AI/jax-das.git
 进入源码目录并开始编译：
 
 ```bash
-cd ./jax-das
-
-# 将编译脚本中的 Python 版本对齐到当前环境
-sed -i "s/--python_version=[0-9]\+\.[0-9]\+/--python_version=${PYTHON_VERSION}/g" build_jax_dtk.sh
+cd ./jax-das/scripts/
 
 # 编译（耗时较长，建议在 tmux / screen 中执行）
 bash build_jax_dtk.sh
@@ -255,9 +212,9 @@ bash build_jax_dtk.sh
 示例：
 
 ```text
-jax-0.10.0+das.opt1.dtk2604-py3-none-any.whl
-jax_rocm6_pjrt-0.10.0+das.opt1.dtk2604-py3-none-manylinux_2_27_x86_64.whl
-jax_rocm6_plugin-0.10.0+das.opt1.dtk2604-{cpversion}-{cpversion}-manylinux_2_27_x86_64.whl
+jax-0.10.0+das.opt1.dtk{dtkversion}-py3-none-any.whl
+jax_rocm6_pjrt-0.10.0+das.opt1.dtk{dtkversion}-py3-none-manylinux_2_27_x86_64.whl
+jax_rocm6_plugin-0.10.0+das.opt1.dtk{dtkversion}-{cpversion}-{cpversion}-manylinux_2_27_x86_64.whl
 jaxlib-0.10.0+das.opt1.dtk{dtkversion}-{cpversion}-{cpversion}-manylinux_2_27_x86_64.whl
 ```
 
