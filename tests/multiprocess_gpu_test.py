@@ -206,7 +206,7 @@ class MultiProcessGpuTest(jtu.JaxTestCase):
         sys.executable,
         '-c',
         ('import jax, os; '
-        'jax.distributed.initialize(spec_detection_method="mpi4py"); '
+        'jax.distributed.initialize(cluster_detection_method="mpi4py"); '
         'print(f\'{jax.local_device_count()},{jax.device_count()}\' if jax.process_index() == 0 else \'\', end="")'
         )
     ]
