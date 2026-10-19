@@ -101,9 +101,17 @@ echo "Wheel version suffix: ${DTK_WHEEL_VERSION_SUFFIX}"
 # Bazel may reuse cached Triton from previous builds.
 # Remove stale Triton cache to make sure xla-das Triton patches are applied.
 echo "Cleaning stale Bazel Triton cache..."
-triton_cache_dirs=("${HOME:-/root}"/.cache/bazel/_bazel_"$(id -un)"/*/external/triton*)
-[[ -e "${triton_cache_dirs[0]}" ]] && rm -rf "${triton_cache_dirs[@]}" || echo "No stale Triton cache found."
-
+shopt -s nullglob
+triton_cache_entries=(
+  "${HOME:-/root}"/.cache/bazel/_bazel_"$(id -un)"/*/external/triton*
+  "${HOME:-/root}"/.cache/bazel/_bazel_"$(id -un)"/*/external/@triton.marker
+)
+shopt -u nullglob
+if ((${#triton_cache_entries[@]})); then
+  rm -rf "${triton_cache_entries[@]}"
+else
+  echo "No stale Triton cache found."
+fi
 # Only override the pinned XLA revision when a local tree was requested.
 XLA_ARGS=()
 if [[ -n "${XLA_DIR:-}" ]]; then
