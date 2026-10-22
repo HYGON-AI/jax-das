@@ -11,7 +11,12 @@ JAX_DIR="${JAX_DIR:-${ROOT_DIR}}"
 # Set XLA_DIR to a local XLA tree to override the pinned revision (development).
 DTK_DIR="${DTK_DIR:-/opt/dtk}"
 AILLVM_DIR="${AILLVM_DIR:-${DTK_DIR}/aillvm}"
-PYTHON_BIN="${PYTHON_BIN:-python3}"
+# Externally set PYTHON_VERSION / PYTHON_BIN take precedence; otherwise
+# PYTHON_BIN defaults to `python`, and its version is detected from it.
+PYTHON_BIN="${PYTHON_BIN:-python}"
+if [[ -z "${PYTHON_VERSION:-}" ]]; then
+  PYTHON_VERSION="$("${PYTHON_BIN}" --version | awk '{split($2,v,"."); print v[1]"."v[2]}')"
+fi
 OUT_DIR="${OUT_DIR:-${ROOT_DIR}/dist}"
 DTK_VERSION="$(cat "${DTK_DIR}/.info/rocm_version")"
 rocm_version=$(cat "${DTK_DIR}/.info/rocm_version" | cut -d "-" -f 1 | tr -d '.')
@@ -34,6 +39,10 @@ while (($#)); do
       echo "              in third_party/xla/revision.bzl. Optional."
       echo "  DTK_DIR     DTK installation. Defaults to /opt/dtk."
       echo "  AILLVM_DIR  HCU LLVM installation. Defaults to \${DTK_DIR}/aillvm."
+      echo "  PYTHON_VERSION"
+      echo "              Python version such as 3.11. Defaults to the version of"
+      echo "              \${PYTHON_BIN}."
+      echo "  PYTHON_BIN  Python interpreter. Defaults to 'python'."
       echo "  DTK_WHEEL_VERSION_SUFFIX"
       echo "              Wheel local version suffix. Defaults to +das.opt1.dtk2604."
       exit 0
@@ -120,6 +129,7 @@ fi
 
 "${PYTHON_BIN}" build/build.py build \
   --wheels=jax,jaxlib,jax-rocm-plugin,jax-rocm-pjrt \
+  --python_version="${PYTHON_VERSION}" \
   --rocm_path="${DTK_DIR}" \
   --rocm_version=60 \
   --rocm_amdgpu_targets="${TARGETS}" \
