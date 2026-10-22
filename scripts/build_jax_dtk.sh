@@ -11,7 +11,8 @@ JAX_DIR="${JAX_DIR:-${ROOT_DIR}}"
 # Set XLA_DIR to a local XLA tree to override the pinned revision (development).
 DTK_DIR="${DTK_DIR:-/opt/dtk}"
 AILLVM_DIR="${AILLVM_DIR:-${DTK_DIR}/aillvm}"
-PYTHON_BIN="${PYTHON_BIN:-python3}"
+PYTHON_VERSION="$(python --version | awk '{split($2,v,"."); print v[1]"."v[2]}')"
+PYTHON_BIN="python${PYTHON_VERSION}"
 OUT_DIR="${OUT_DIR:-${ROOT_DIR}/dist}"
 DTK_VERSION="$(cat "${DTK_DIR}/.info/rocm_version")"
 rocm_version=$(cat "${DTK_DIR}/.info/rocm_version" | cut -d "-" -f 1 | tr -d '.')
@@ -120,6 +121,7 @@ fi
 
 "${PYTHON_BIN}" build/build.py build \
   --wheels=jax,jaxlib,jax-rocm-plugin,jax-rocm-pjrt \
+  --python_version="${PYTHON_VERSION}" \
   --rocm_path="${DTK_DIR}" \
   --rocm_version=60 \
   --rocm_amdgpu_targets="${TARGETS}" \
