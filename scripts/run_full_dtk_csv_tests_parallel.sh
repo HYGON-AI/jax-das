@@ -316,6 +316,11 @@ def clean_reason(text: str | None) -> str:
     text = text[:497].rstrip() + "..."
   return text
 
+def match_key(nodeid: str) -> str:
+  # 参数化测试名可能含换行和缩进（如 numpy 数组 repr），collect 输出与 JUnit XML
+  # 的空白不一定逐字一致，去掉全部空白后再匹配。
+  return ws_re.sub("", nodeid)
+
 def rel_from_safe(stem: str) -> str:
   # fallback：仅在 collect 文件缺少 # REL: 头时使用
   return stem.replace("__", "/") + ".py"
@@ -426,13 +431,26 @@ rows = []
 for collect_path in sorted((run_dir / "collect").glob("*.txt")):
   rel = read_rel_from_collect(collect_path)
   collected = []
-  for line in collect_path.read_text(errors="replace").splitlines():
+  current = None
+  for raw_line in collect_path.read_text(errors="replace").splitlines():
+    line = ansi_re.sub("", raw_line)
     subcase = extract_subcase(line)
     if subcase is not None:
-      collected.append(f"{rel}::{subcase}")
-  collected = sorted(dict.fromkeys(collected))
+      if current is not None:
+        collected.append(current)
+      current = f"{rel}::{subcase}"
+    elif current is not None and (not line.strip() or line[:1].isspace()):
+      # 参数化测试名里的字面换行会让一个 nodeid 跨多行输出，续行以空白开头或为空行。
+      current += "\n" + line
+    elif current is not None:
+      collected.append(current)
+      current = None
+  if current is not None:
+    collected.append(current)
+  collected = sorted(dict.fromkeys(nodeid.rstrip() for nodeid in collected))
 
   results: dict[str, tuple[str, str]] = {}
+  xml_valid = False
   xml_path = run_dir / "xml" / f"{collect_path.stem}.xml"
   if xml_path.exists():
     try:
@@ -443,18 +461,17 @@ for collect_path in sorted((run_dir / "collect").glob("*.txt")):
         error = case.find("error")
         skipped = case.find("skipped")
         if failure is None and error is None and skipped is None:
-          results[nodeid] = ("pass", "")
+          status, reason = "pass", ""
         else:
           elem = failure if failure is not None else error if error is not None else skipped
           reason = clean_reason(elem.attrib.get("message") or elem.text)
-          if skipped is not None:
-            results[nodeid] = ("skip", reason)
-          else:
-            results[nodeid] = ("fail", reason)
+          status = "skip" if skipped is not None else "fail"
+        results[match_key(nodeid)] = (nodeid, status, reason)
+      xml_valid = True
     except ET.ParseError as exc:
       fallback = f"JUnit XML parse failed: {exc}"
       for nodeid in collected:
-        results.setdefault(nodeid, ("fail", fallback))
+        results.setdefault(match_key(nodeid), (nodeid, "fail", fallback))
 
   row = summary.get(rel, {})
   log_path = Path(row.get("log", "")) if row.get("log") else run_dir / "logs" / f"{collect_path.stem}.log"
@@ -468,9 +485,13 @@ for collect_path in sorted((run_dir / "collect").glob("*.txt")):
     fallback = f"process failed with exit code {exit_code}"
   fallback = reason_from_log(log_path, fallback)
 
-  all_nodeids = collected or sorted(results)
-  for nodeid in all_nodeids:
-    status, reason = results.get(nodeid, ("fail", fallback))
+  # pytest 正常退出且写出了合法 JUnit XML 时以 XML 为准；否则合并 collect 结果，
+  # 让没有 JUnit 结果的子测例以 fallback 原因显示为 fail。
+  entries = dict(results)
+  if not (exit_code == "0" and xml_valid):
+    for nodeid in collected:
+      entries.setdefault(match_key(nodeid), (nodeid, "fail", fallback))
+  for nodeid, status, reason in sorted(entries.values()):
     sort_status = {"pass": 0, "skip": 1, "fail": 2}.get(status, 3)
     rows.append((sort_status, rel, subcase_from_nodeid(nodeid, rel), status, reason))
 
