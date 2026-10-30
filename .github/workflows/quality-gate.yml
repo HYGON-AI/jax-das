@@ -3,8 +3,6 @@ name: Quality Gate
 on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
-    branches:
-      - v0.10.0-das
 
 permissions:
   contents: read
