@@ -48,6 +48,9 @@ __version__ = _version_module._get_version_for_build()
 if rocm_tag:
   __version__ = __version__ + "+rocm" + rocm_tag
 _cmdclass = _version_module._get_cmdclass(package_name)
+# Pin the public version only: the release process renames the wheels with its
+# own local version (e.g. 0.10.0+dtk2604.<date>.g<hash>), which "==" then ignores.
+_public_version = __version__.split("+")[0]
 
 class BinaryDistribution(Distribution):
   """This class makes 'bdist_wheel' include an ABI tag on the wheel."""
@@ -66,7 +69,7 @@ setup(
     author_email="dl.dl-JAX@amd.com",
     packages=[package_name],
     python_requires=">=3.11",
-    install_requires=[f"jax-rocm{rocm_version}-pjrt=={__version__}"],
+    install_requires=[f"jax-rocm{rocm_version}-pjrt=={_public_version}"],
     url="https://github.com/jax-ml/jax",
     license="Apache-2.0",
     classifiers=[
