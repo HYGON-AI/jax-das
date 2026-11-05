@@ -213,12 +213,12 @@ bash build_jax_dtk.sh
 
 ```text
 jax-0.10.0+das.opt1.dtk{dtkversion}-py3-none-any.whl
-jax_rocm6_pjrt-0.10.0+das.opt1.dtk{dtkversion}-py3-none-manylinux_2_27_x86_64.whl
-jax_rocm6_plugin-0.10.0+das.opt1.dtk{dtkversion}-{cpversion}-{cpversion}-manylinux_2_27_x86_64.whl
-jaxlib-0.10.0+das.opt1.dtk{dtkversion}-{cpversion}-{cpversion}-manylinux_2_27_x86_64.whl
+jax_rocm6_pjrt-0.10.0+das.opt1.dtk{dtkversion}-py3-none-manylinux_{glibcversion}_x86_64.whl
+jax_rocm6_plugin-0.10.0+das.opt1.dtk{dtkversion}-{cpversion}-{cpversion}-manylinux_{glibcversion}_x86_64.whl
+jaxlib-0.10.0+das.opt1.dtk{dtkversion}-{cpversion}-{cpversion}-manylinux_{glibcversion}_x86_64.whl
 ```
 
-其中，`{cpversion}` 对应 Python 版本，例如，Python 3.12 对应 `cp312`；dtk`{dtkversion}`对应 dtk 版本，如 dtk26.04 对应dtk2604。
+其中，`{cpversion}` 对应 Python 版本，例如，Python 3.12 对应 `cp312`；dtk`{dtkversion}`对应 dtk 版本，如 dtk26.04 对应dtk2604；`{glibcversion}` 对应编译镜像的 glibc 版本，例如，glibc 2.28 对应 `2_28`。
 
 ### 7. 安装 jax 
 
