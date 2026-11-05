@@ -14,7 +14,7 @@ set -eo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="${ROOT_DIR:-$(cd "${SCRIPT_DIR}/.." && pwd)}"
 DTK_DIR="${DTK_DIR:-/opt/dtk}"
-PYTHON_BIN="${PYTHON_BIN:-python3.11}"
+PYTHON_BIN="${PYTHON_BIN:-python}"
 TEST_ROOT="${TEST_ROOT:-${ROOT_DIR}/tests}"
 TEST_PATTERN="${TEST_PATTERN:-*_test.py}"
 RUN_NAME="${RUN_NAME:-dtk_full_csv_$(date +%Y%m%d_%H%M%S)}"
