@@ -70,6 +70,7 @@ from jax._src.traceback_util import api_boundary
 from jax._src import tree_util
 from jax._src.util import unzip2, safe_map, safe_zip, wraps
 from jax._src import util
+from jax._src.ad_util import a2tz
 
 from jax._src.interpreters import ad
 from jax._src.interpreters import batching
@@ -329,7 +330,7 @@ def jit(
 
     >>> from functools import partial
     >>>
-    >>> @partial(jax.jit, static_argnames=['n'])
+    >>> @jax.jit(static_argnames=['n'])
     ... def g(x, n):
     ...   for i in range(n):
     ...     x = x ** 2
@@ -506,7 +507,7 @@ def value_and_grad(fun: Callable, argnums: int | Sequence[int] = 0,
     shapes and types as the corresponding arguments. If ``has_aux`` is True
     then a tuple of ((value, auxiliary_data), gradient) is returned.
   """
-  from jax._src.lax import lax as lax_internal  # pytype: disable=import-error
+  from jax._src.lax import lax as lax_internal  # pyrefly: ignore[missing-import]
 
   if reduce_axes:
     raise NotImplementedError("reduce_axes argument to grad is deprecated")
@@ -926,12 +927,12 @@ def hessian(fun: Callable, argnums: int | Sequence[int] = 0,
                 argnums, has_aux=has_aux, holomorphic=holomorphic)
 
 def _insert_pvary(basis, leaf):
-  if not config._check_vma.value:
+  if not config._check_vma.value or not config.auto_pcast.value:
     return basis
   return core.pvary(basis, tuple(core.typeof(leaf).mat.varying))
 
 def _std_basis(pytree):
-  import jax.numpy as jnp  # pytype: disable=import-error
+  import jax.numpy as jnp  # pyrefly: ignore[missing-import]
   leaves, _ = tree_flatten(pytree)
   ndim = sum(map(np.size, leaves))
   dtype = dtypes.result_type(*leaves)
@@ -961,7 +962,7 @@ def _jacrev_unravel(output_pytree, input_pytree_leaf, arr):
     output_pytree, 0, input_pytree_leaf, arr, specs)
 
 def _possible_downcast(x, example, spec):
-  from jax._src.lax import lax as lax_internal  # pytype: disable=import-error
+  from jax._src.lax import lax as lax_internal  # pyrefly: ignore[missing-import]
   if (dtypes.issubdtype(x.dtype, np.complexfloating) and
       not dtypes.issubdtype(_dtype(example), np.complexfloating)):
     x = x.real
@@ -1157,7 +1158,7 @@ def vmap(fun: F,
     # rather than raising an error. https://github.com/jax-ml/jax/issues/2367
     in_axes = tuple(in_axes)
 
-  from jax._src import hijax  # pytype: disable=import-error
+  from jax._src import hijax  # pyrefly: ignore[missing-module-attribute]
   if not (in_axes is None or type(in_axes) in {int, tuple, *batching.spec_types}
           or isinstance(in_axes, hijax.MappingSpec)):
     raise TypeError("vmap in_axes must be an int, None, or a tuple of entries corresponding "
@@ -1538,17 +1539,17 @@ def linearize(fun: Callable, *primals, has_aux: bool = False
     jaxtree_fun, out_tree = flatten_fun_nokwargs2(f, in_tree)
   else:
     jaxtree_fun, out_tree = flatten_fun_nokwargs(f, in_tree)
-  out_primals, out_pvals, jaxpr, consts, *maybe_aux = ad.linearize(
+  out_primals, out_known, jaxpr, consts, *maybe_aux = ad.linearize(
       jaxtree_fun, *primals_flat, has_aux=has_aux)
   if has_aux:
     out_tree, aux_tree = out_tree()
   else:
     out_tree, aux_tree = out_tree(), None
   out_primal_py = tree_unflatten(out_tree, out_primals)
-  primal_avals = list(map(core.typeof, primals_flat))
-  # Ensure that lifted_jvp is a PyTree
-  lifted_jvp = Partial(partial(_lift_linearized, jaxpr, primal_avals,
-                               (in_tree, out_tree), out_pvals), consts)
+  in_avals = list(map(core.typeof, primals_flat))
+  out_avals = list(map(core.typeof, out_primals))
+  lifted_jvp = Partial(partial(_lift_linearized, jaxpr, in_avals, out_avals,
+                               (in_tree, out_tree), out_known), consts)
   if has_aux:
     [aux] = maybe_aux
     assert aux_tree is not None
@@ -1557,10 +1558,10 @@ def linearize(fun: Callable, *primals, has_aux: bool = False
     [] = maybe_aux
     return out_primal_py, lifted_jvp
 
-def _lift_linearized(jaxpr, primal_avals, io_tree, out_pvals, consts, *py_args):
+def _lift_linearized(jaxpr, in_avals, out_avals, io_tree, out_known, consts, *py_args):
   def fun(*tangents):
     tangent_avals = list(map(core.typeof, tangents))
-    for primal_aval, tangent_aval in zip(primal_avals, tangent_avals):
+    for primal_aval, tangent_aval in zip(in_avals, tangent_avals):
       expected_tangent_aval  = primal_aval.to_tangent_aval()
       if not core.typecompat(expected_tangent_aval, tangent_aval):
         extra_msg = ''
@@ -1587,8 +1588,8 @@ def _lift_linearized(jaxpr, primal_avals, io_tree, out_pvals, consts, *py_args):
             f"but expected {expected_tangent_aval}.{extra_msg}")
     tangents_out = eval_jaxpr(jaxpr, consts, *tangents)
     tangents_out_ = iter(tangents_out)
-    full_out = [pval.get_known() if pval.is_known() else next(tangents_out_)
-                for pval in out_pvals]
+    full_out = [a2tz(aval).instantiate() if known else next(tangents_out_)
+                for aval, known in zip(out_avals, out_known)]
     assert next(tangents_out_, None) is None
     return full_out
 
@@ -1672,17 +1673,16 @@ def _vjp(fun, *primals, has_aux=False):
     dispatch.check_arg(arg)
   if not has_aux:
     flat_fun, out_tree = flatten_fun_nokwargs(fun, in_tree)
-    out_primals_flat, out_pvals, jaxpr, residuals = ad.linearize(
+    out_primals_flat, out_known, jaxpr, residuals = ad.linearize(
         flat_fun, *primals_flat, is_vjp=True)
     out_tree = out_tree()
     aux = aux_tree = None
   else:
     flat_fun, out_aux_trees = flatten_fun_nokwargs2(fun, in_tree)
-    out_primals_flat, out_pvals, jaxpr, residuals, aux = ad.linearize(
+    out_primals_flat, out_known, jaxpr, residuals, aux = ad.linearize(
         flat_fun, *primals_flat, has_aux=True, is_vjp=True)
     out_tree, aux_tree = out_aux_trees()
     del out_aux_trees
-  out_known = [pval.is_known() for pval in out_pvals]
   id_map = {id(x): i for i, x in enumerate(primals_flat)}
   used, opaque_residuals = set(), []
   spec = [used.add(id(r)) or RSpec(id_map[id(r)], True) if id(r) in id_map else

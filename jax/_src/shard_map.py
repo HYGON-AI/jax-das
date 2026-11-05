@@ -315,7 +315,10 @@ def _shard_map(f: F, *, mesh: Mesh | AbstractMesh | None,
         e, *_ = prefix_errors(out_specs, ans)
         raise e('shard_map out_specs') from None
       def add_implicit_pvary_and_unreduced(val, spec):
-        if not isinstance(spec, P): return val
+        if not config.auto_pcast.value:
+          return val
+        if not isinstance(spec, P):
+          return val
         aval = typeof(val)
         val = pvary(val, tuple(_spec_to_vma(spec) - aval.mat.varying))
         return (lax_parallel.vary_unreduced_cast(val, tuple(unreduced))
@@ -912,11 +915,11 @@ def _shardy_shard_map_sharding(
   if dtypes.issubdtype(aval_in.dtype, dtypes.extended):
     ns = sharding_impls.physical_sharding(aval_in, ns)
     aval_in = core.physical_aval(aval_in)
-  sdy_sharding = ns._to_sdy_sharding(aval_in.ndim)
   if len(manual_axes) < len(mesh.axis_names):
-    for dim_sharding in sdy_sharding.dim_shardings:
-      dim_sharding.is_open = True
-  return sdy_sharding
+    # In partial manual case, mark all dims as open.
+    return ns._to_sdy_sharding(aval_in.ndim, modify_wrt_axis_types=True)
+  else:
+    return ns._to_sdy_sharding(aval_in.ndim)
 
 
 def _get_token_sharding(
@@ -964,7 +967,7 @@ def _shard_map_lowering_shardy(
       ctx.set_tokens_out(tokens_out)
     return out_nodes
 
-  in_shardings = list(
+  in_shardings = tuple(
       map(partial(_shardy_shard_map_sharding, ctx, mesh, manual_axes),
           in_specs, ctx.avals_in))
   const_args_and_avals = core.jaxpr_const_args(jaxpr)
@@ -976,25 +979,27 @@ def _shard_map_lowering_shardy(
   )
   # TODO(necula,yashkatariya): how to construct consts shardy shardings from
   #  consts that can be ndarray or jax.Array?
-  const_args_shardings = [
+  const_args_shardings = tuple(
       _shardy_shard_map_sharding(ctx, mesh, manual_axes, P(), core.typeof(c))
-      for c in const_args]
+      for c in const_args)
 
   num_dim_vars = len(ctx.dim_var_values)
   in_shardings = (
-      [_get_token_sharding(ctx, mesh)] * (num_tokens + num_dim_vars) +
+      (_get_token_sharding(ctx, mesh),) * (num_tokens + num_dim_vars) +
       const_args_shardings + in_shardings)
-  in_shardings = sharding_impls.SdyArrayList(in_shardings).build()
+  in_shardings = sharding_impls.SdyArrayList(in_shardings).build(
+      ctx.module_context.sharding_attr_cache)
 
-  out_shardings = list(
+  out_shardings = tuple(
       map(partial(_shardy_shard_map_sharding, ctx, mesh, manual_axes),
           out_specs, ctx.avals_out))
-  out_shardings = [
-      _get_token_sharding(ctx, mesh)] * num_tokens + out_shardings
-  out_shardings = sharding_impls.SdyArrayList(out_shardings).build()
+  out_shardings = (
+      _get_token_sharding(ctx, mesh),) * num_tokens + out_shardings
+  out_shardings = sharding_impls.SdyArrayList(out_shardings).build(
+      ctx.module_context.sharding_attr_cache)
 
   output_types = ([hlo.TokenType.get()] * num_tokens +
-                  mlir.flatten_ir_types(map(mlir.aval_to_ir_types, ctx.avals_out)))
+                  mlir.flatten_ir_types(map(partial(mlir._aval_to_ir_types, ctx.module_context), ctx.avals_out)))
 
   args = (*ctx.dim_var_values, *tokens, *const_arg_values, *in_nodes)
   manual_computation_op = sdy.ManualComputationOp(
@@ -1002,11 +1007,11 @@ def _shard_map_lowering_shardy(
       sdy.ManualAxesAttr.get([ir.StringAttr.get(i) for i in manual_axes]))
 
   dim_var_types = [
-    mlir.aval_to_ir_type(core.ShapedArray((), dtypes.default_int_dtype()))
+    mlir.aval_to_ir_type(ctx.module_context, core.ShapedArray((), dtypes.default_int_dtype()))
   ] * num_dim_vars
   token_types = [hlo.TokenType.get()] * num_tokens
-  const_arg_types = mlir.flatten_ir_types(map(mlir.aval_to_ir_types, const_avals))
-  in_types = mlir.flatten_ir_types(map(mlir.aval_to_ir_types, in_avals_))
+  const_arg_types = mlir.flatten_ir_types(map(partial(mlir._aval_to_ir_types, ctx.module_context), const_avals))
+  in_types = mlir.flatten_ir_types(map(partial(mlir._aval_to_ir_types, ctx.module_context), in_avals_))
   block = ir.Block.create_at_start(
       manual_computation_op.body,
       (*dim_var_types, *token_types, *const_arg_types, *in_types))
@@ -1025,7 +1030,7 @@ def _shard_map_lowering_shardy(
             for c, aval, ca in zip(const_args, const_avals, const_arg_values)
         },
         outer_traceback=_jax.Traceback())
-    sdy.ReturnOp(
+    sdy.return_(
         mlir.flatten_ir_values(
             it.chain((v for _, v in tokens_out.items()), out_nodes_)
         )
@@ -1308,6 +1313,10 @@ class ShardMapTrace(core.Trace):
       val_ = _unmatch_spec(self.mesh, self.check, self.amesh, self.manual_axes,
                            P(), val)
       return val_, core.empty_mat
+
+  def stage_value(self, val):
+    val_, mat = self.to_val_mat_pair(val)
+    return ShardMapTracer(self, mat, val_)
 
   def process_primitive(self, prim, tracers, params, /):
     in_vals, in_mat = unzip2(map(self.to_val_mat_pair, tracers))

@@ -102,7 +102,7 @@ if RUNTIME_PATH and RUNTIME_PATH.exists():
 
 
 try:
-  from nvidia import nvshmem  # pytype: disable=import-error
+  from nvidia import nvshmem  # pyrefly: ignore[missing-import]
 except ImportError:
   # Try to find the nvshmem library in Bazel test runfiles.
   if BAZEL_TEST == "1" and PYTHON_RUNFILES:
@@ -111,7 +111,7 @@ except ImportError:
     )
     if os.path.exists(libdevice_path):
       os.environ["MOSAIC_GPU_NVSHMEM_BC_PATH"] = libdevice_path
-    for solib_path in ["_solib_linux_x86_64", "_solib_linux_aarch64"]:
+    for solib_path in ["_solib_x86_64", "_solib_aarch64"]:
       if not os.path.exists(
           os.path.join(PYTHON_RUNFILES, "__main__", solib_path)
       ):
@@ -287,7 +287,7 @@ def _mosaic_gpu_lowering_rule(
   return mlir.custom_call(
       call_target_name="mosaic_gpu_v2",
       result_types=mlir.flatten_ir_types(
-          mlir.aval_to_ir_type(aval) for aval in ctx.avals_out
+          mlir.aval_to_ir_type(ctx.module_context, aval) for aval in ctx.avals_out
       ),
       operands=args,
       operand_layouts=[list(reversed(range(a.ndim))) for a in ctx.avals_in],
@@ -334,6 +334,8 @@ class ClusterBarrier:
   collective_dims: Sequence[gpu.Dimension | Sequence[gpu.Dimension]]
   arrival_count: int = 1
   num_barriers: int = 1
+  _: dataclasses.KW_ONLY
+  orders_tensor_core: bool = False
   leader_tracked: bool = False
 
 @dataclasses.dataclass(frozen=True)
@@ -422,7 +424,7 @@ def _slice_smem(
     lowering_semantics: LoweringSemantics,
 ) -> ir.Value:
   if lowering_semantics == LoweringSemantics.Warpgroup:
-    return dialect.slice_smem(result, offset)  # pyrefly: ignore[bad-argument-type]
+    return dialect.slice_smem(result, offset)
   else:
     ir_offset = arith.constant(ir.IndexType.get(), offset)
     return memref.view(result, smem_base, ir_offset, [])
@@ -503,10 +505,10 @@ def _construct_smem_reftree(
             else utils.BarrierRef.initialize
         )
         ref = init_fn(barrier_memref(num_barriers), arrival_count=arrival_count)
-      case ClusterBarrier(collective_dims, arrival_count, num_barriers, leader_tracked):
+      case ClusterBarrier(collective_dims, arrival_count, num_barriers):
         ref = utils.CollectiveBarrierRef.initialize(
             barrier_memref(num_barriers), arrival_count, collective_dims,
-            cluster_shape, leader_tracked=leader_tracked
+            cluster_shape, leader_tracked=ref_ty.leader_tracked
         )
       case TMEM(shape, dtype, layout=layout, collective=collective, packing=packing):
         addr_ref = _slice_smem(
@@ -813,8 +815,9 @@ def _lower_as_gpu_kernel(
     jax_mesh: mesh_lib.Mesh | None = None,
     base_loc: ir.Location | None = None,
 ):
-  ptr_ty = ir.Type.parse("!llvm.ptr")
-  token_ty = ir.Type.parse("!gpu.async.token")
+  ptr_ty = llvm.PointerType.get()
+  token_ty = gpu.AsyncTokenType.get()
+  i8 = ir.IntegerType.get_signless(8)
   i32 = ir.IntegerType.get_signless(32)
 
   def _shape_to_ref_ty(shape: jax.ShapeDtypeStruct) -> ir.MemRefType:
@@ -847,7 +850,7 @@ def _lower_as_gpu_kernel(
   with ir.InsertionPoint(module.body):
     _declare_runtime_functions()
     global_scratch = llvm.GlobalOp(
-        ir.Type.parse("!llvm.array<0 x i8>"),  # We don't know the shape yet.
+        llvm.ArrayType.get(i8, 0),  # We don't know the shape yet.
         "global_scratch",
         ir.Attribute.parse("#llvm.linkage<external>"),
         addr_space=ir.IntegerAttr.get(i32, 4),  # GPU constant memory.
@@ -948,7 +951,7 @@ def _run_serde_pass(
 
 def _declare_runtime_functions():
   """Declares the runtime functions that can be used by the generated code."""
-  ptr_ty = ir.Type.parse("!llvm.ptr")
+  ptr_ty = llvm.PointerType.get()
   i64 = ir.IntegerType.get_signless(64)
   arg_tys = [ptr_ty, ptr_ty, i64, i64, ptr_ty, ptr_ty, i64, ptr_ty]
   init_tma_desc_type = ir.FunctionType.get(arg_tys, [])

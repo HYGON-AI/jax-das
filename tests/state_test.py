@@ -822,6 +822,21 @@ class StateDischargeTest(jtu.JaxTestCase):
     self.assertLen(f_jaxpr.out_avals, 2)
     self.assertLen(jaxpr.outvars, 3)
 
+  def test_discharge_call_primitive(self):
+    def f(y_ref, x):
+      def g(x):
+        y_ref[...] = x + 1.0
+        return []
+      return core.call_p.bind(x, subfuns=(wrap_init(g, 1),))
+
+    y_ref_aval = shaped_array_ref((), jnp.float32)
+    x_aval = core.ShapedArray((), jnp.float32)
+    stateful_jaxpr, _, consts = pe.trace_to_jaxpr_dynamic(
+        wrap_init(f, 2), [y_ref_aval, x_aval])
+
+    # This should successfully discharge without a TypeError.
+    discharge_state(stateful_jaxpr, consts, should_discharge=[True, False])
+
 
 def index_arrays(size, idx_shape):
   valid_idx = hps.integers(min_value=-size, max_value=size - 1)
@@ -844,7 +859,7 @@ def index_params(draw):
   indexed_dims = draw(hps.lists(hps.booleans(),
                                 min_size=len(ref_shape),
                                 max_size=len(ref_shape)))
-  idx_shape = draw(hnp.array_shapes(max_dims=3, max_side=5))
+  idx_shape = draw(hnp.array_shapes(min_dims=0, max_dims=3, max_side=5))
   if not any(indexed_dims):
     slice_shape = ref_shape
   else:
@@ -1031,7 +1046,6 @@ class StateHypothesisTest(jtu.JaxTestCase):
 
     self.assertAllClose(discharge_of_vmap_ans, vmap_of_discharge_ans,
                         check_dtypes=False)
-
 
   @hp.given(set_vmap_params())
   @hp.settings(deadline=None, print_blob=True,

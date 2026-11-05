@@ -266,7 +266,10 @@ def _gather_lowering_rule(
 ):
   ref, transforms, indices, mask = tree.unflatten(flat_args)
   ref_aval, *_ = tree.unflatten(ctx.avals_in)
-  if ref_aval.memory_space not in (tpu_core.MemorySpace.VMEM, None):
+  if ref_aval.memory_space not in (
+      tpu_core.MemorySpace.VMEM,
+      pallas_core.MemorySpace.DEFAULT,
+  ):
     raise ValueError(
         f"Gather only supports loading from VMEM, got {ref_aval.memory_space}"
     )
@@ -340,7 +343,10 @@ def _scatter_lowering_rule(
 ):
   ref, transforms, indices, x, mask = jax.tree.unflatten(tree, flat_args)
   ref_aval, *_ = tree.unflatten(ctx.avals_in)
-  if ref_aval.memory_space not in (tpu_core.MemorySpace.VMEM, None):
+  if ref_aval.memory_space not in (
+      tpu_core.MemorySpace.VMEM,
+      pallas_core.MemorySpace.DEFAULT,
+  ):
     raise ValueError(
         f"Scatter only supports storing to VMEM, got {ref_aval.memory_space}"
     )
@@ -467,14 +473,8 @@ def _barrier_lowering_rule(ctx: sc_lowering.LoweringRuleContext):
 def subcore_barrier():
   """Blocks until all subcores on the same core reach this instruction.
 
-  The barrier must be used with the vector subcore, either via
-  :class:jax.experimental.pallas.tpu_sc.VectorSubcoreMesh or by passing::
-
-      pltpu.CompilerParams(
-          kernel_type=pltpu.CoreType.SC_VECTOR_SUBCORE,
-          dimension_semantics[..., "subcore_parallel", ...])
-
-  to ``pallas_call``.
+  The barrier must be used with
+  :class:jax.experimental.pallas.tpu_sc.VectorSubcoreMesh.
   """
   barrier_p.bind()
 

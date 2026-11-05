@@ -15,12 +15,12 @@
 # NVIDIA CUDA kernels
 
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
-load("@rules_python//python:defs.bzl", "py_library")
 load(
     "//jaxlib:jax.bzl",
     "cuda_library",
     "if_cuda_is_configured",
     "nanobind_extension",
+    "py_library",
 )
 
 licenses(["notice"])
@@ -479,8 +479,22 @@ cc_library(
         ":cudnn_rnn_kernels",
         ":cusolver_kernels_ffi",
         ":cusparse_kernels",
-        ":triton_kernels",
+        ":triton_support",
         "//jaxlib/mosaic/gpu:mosaic_gpu_support",
+        "@xla//xla/ffi/api:c_api",
+        "@xla//xla/ffi/api:ffi",
+    ],
+    alwayslink = 1,
+)
+
+cc_library(
+    name = "triton_support",
+    srcs = ["//jaxlib/gpu:triton_support.cc"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":cuda_vendor",
+        ":triton_kernels",
+        "//jaxlib:kernel_helpers",
         "@xla//xla/ffi/api:c_api",
         "@xla//xla/ffi/api:ffi",
         "@xla//xla/service:custom_call_target_registry",
@@ -495,6 +509,7 @@ cc_library(
     deps = [
         ":cuda_gpu_kernel_helpers",
         ":cuda_vendor",
+        ":ffi_wrapper",
         ":triton_utils",
         "//jaxlib/gpu:triton_cc_proto",
         "@com_google_absl//absl/algorithm:container",
@@ -502,6 +517,7 @@ cc_library(
         "@com_google_absl//absl/cleanup",
         "@com_google_absl//absl/container:flat_hash_map",
         "@com_google_absl//absl/container:flat_hash_set",
+        "@com_google_absl//absl/hash",
         "@com_google_absl//absl/log",
         "@com_google_absl//absl/log:check",
         "@com_google_absl//absl/status",
@@ -510,6 +526,7 @@ cc_library(
         "@com_google_absl//absl/strings:str_format",
         "@com_google_absl//absl/strings:string_view",
         "@com_google_absl//absl/synchronization",
+        "@xla//xla/ffi/api:ffi",
         "@xla//xla/service:custom_call_status",
         "@xla//xla/stream_executor/cuda:cuda_asm_compiler",
         "@xla//xla/stream_executor/cuda:cuda_compute_capability",
@@ -557,6 +574,7 @@ nanobind_extension(
         "//jaxlib/gpu:triton_cc_proto",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings",
         "@nanobind",
     ],
 )

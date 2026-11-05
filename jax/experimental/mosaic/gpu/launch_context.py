@@ -126,10 +126,18 @@ class MemRefTransform:
   def transform_shape(self, shape: Sequence[int]) -> tuple[int, ...]:
     raise NotImplementedError("Subclasses should override this method")
 
+  def transform_gmem_shape(self, shape: Sequence[int]) -> tuple[int, ...]:
+    """Applies the shape transformation to the given GMEM shape.
+
+    This function is intended to mirror the behavior of the `apply` method on
+    GMEM shapes.
+    """
+    raise NotImplementedError("Subclasses should override this method")
+
   def transform_strides(self, strides: Sequence[int]) -> tuple[int, ...]:
     raise NotImplementedError("Subclasses should override this method")
 
-  def batch(self, leading_rank: int) -> 'MemRefTransform':
+  def batch(self, leading_rank: int) -> MemRefTransform:
     """Returns a transform that accepts a ref with the extra `leading_rank` dims.
 
     The returned transform should leave the leading dimensions unchanged and
@@ -161,28 +169,38 @@ class TileTransform(MemRefTransform):
   tiling: tuple[int, ...]
   rounding: Rounding | None = None
 
-  _cc_impl: Any | None = dataclasses.field(init=False, compare=False)
-
-  def __post_init__(self):
-    if not hasattr(mgpu_dialect, "TileTransform"):
-      return
-    rounding = self.rounding
-    if rounding is not None:
-      if rounding == Rounding.UP:
-        rounding = mgpu_dialect.Rounding.UP
-      elif rounding == Rounding.DOWN:
-        rounding = mgpu_dialect.Rounding.DOWN
+  def transform_gmem_shape(self, shape: Sequence[int]) -> tuple[int, ...]:
+    untiled_rank = len(shape)
+    tiling_rank = len(self.tiling)
+    tiled_rank = untiled_rank + tiling_rank
+    shape = list(shape)
+    for t, d in zip(self.tiling[::-1], range(untiled_rank)[::-1]):
+      s = shape[d]
+      if s > t:
+        if s % t:
+          match self.rounding:
+            case None:
+              raise ValueError(
+                  f"When no rounding mode is specified, dimension {d} must have"
+                  f" size smaller or a multiple of its tiling {t}, but got {s}"
+              )
+            case Rounding.UP:
+              raise NotImplementedError
+            case Rounding.DOWN:
+              s = s // t * t
+            case _:
+              raise ValueError(f"Unknown rounding mode: {self.rounding}")
       else:
-        raise ValueError(f"Unknown rounding mode: {rounding}")
-    object.__setattr__(
-        self,
-        "_cc_impl",
-        mgpu_dialect.TileTransform(self.tiling, rounding),
+        t = s
+      shape[d : d + 1] = (s // t, t)
+    permutation = (
+        *range(untiled_rank - tiling_rank),
+        *range(untiled_rank - tiling_rank, tiled_rank, 2),
+        *range(untiled_rank - tiling_rank + 1, tiled_rank, 2),
     )
+    return TransposeTransform(permutation).transform_shape(shape)
 
   def apply(self, ref: ir.Value) -> ir.Value:
-    if (impl := self._cc_impl) is not None:
-      return impl.apply(ref)
     untiled_rank = ir.MemRefType(ref.type).rank
     tiling_rank = len(self.tiling)
     tiled_rank = untiled_rank + tiling_rank
@@ -216,8 +234,6 @@ class TileTransform(MemRefTransform):
     return utils.memref_transpose(ref, permutation)
 
   def transform_index(self, idx: Sequence[ir.Value]) -> tuple[ir.Value, ...]:
-    if (impl := self._cc_impl) is not None:
-      return impl.transform_index(idx)
     index = ir.IndexType.get()
     tiling_rank = len(self.tiling)
     return (
@@ -233,8 +249,6 @@ class TileTransform(MemRefTransform):
     )
 
   def transform_shape(self, shape: Sequence[int]) -> tuple[int, ...]:
-    if (impl := self._cc_impl) is not None:
-      return impl.transform_shape(shape)
     # Note that this also checks that tiled dims are not squeezed. Their slice
     # size would be 1 if so.
     tiling_rank = len(self.tiling)
@@ -256,8 +270,6 @@ class TileTransform(MemRefTransform):
     )
 
   def transform_strides(self, strides: Sequence[int]) -> tuple[int, ...]:
-    if (impl := self._cc_impl) is not None:
-      return impl.transform_strides(strides)
     tiling_rank = len(self.tiling)
     return (
         *strides[:-tiling_rank],
@@ -282,6 +294,9 @@ class TransposeTransform(MemRefTransform):
 
   def apply(self, ref: ir.Value) -> ir.Value:
     return utils.memref_transpose(ref, self.permutation)
+
+  def transform_gmem_shape(self, shape: Sequence[int]) -> tuple[int, ...]:
+    return self.transform_shape(shape)
 
   def transform_index(self, idx: Sequence[ir.Value]) -> tuple[ir.Value, ...]:
     return tuple(idx[p] for p in self.permutation)
@@ -333,6 +348,9 @@ class CollapseLeadingIndicesTransform(MemRefTransform):
         static_strides=new_strides,
     )
 
+  def transform_gmem_shape(self, shape: Sequence[int]) -> tuple[int, ...]:
+    raise NotImplementedError  # Unused
+
   def transform_index(self, idx: Sequence[ir.Value]) -> tuple[ir.Value, ...]:
     index = ir.IndexType.get()
     flat_idx = c(0, index)
@@ -346,6 +364,54 @@ class CollapseLeadingIndicesTransform(MemRefTransform):
     if any(s != 1 for s in shape[:len(self.strides)]):
       raise ValueError("Expected leading indices to be squeezed")
     return (1, *shape[len(self.strides):])
+
+  def batch(self, leading_rank: int) -> MemRefTransform:
+    raise NotImplementedError  # Unused
+
+
+@dataclasses.dataclass(frozen=True)
+class DropUnitDimsTransform(MemRefTransform):
+  """Drops unit dimensions at the given positions."""
+  unit_dims: tuple[int, ...]
+
+  def apply(self, ref: ir.Value) -> ir.Value:
+    ref_ty = ir.MemRefType(ref.type)
+    strides, offset = ref_ty.get_strides_and_offset()
+    rank = len(ref_ty.shape)
+    # This will assert that all the relevant dimensions are indeed trivial.
+    new_shape = self.transform_shape(ref_ty.shape)
+    new_strides = [strides[i] for i in range(rank) if i not in self.unit_dims]
+    # Not propagating offset, as it is folded into the ref by `memref_ptr`.
+    new_layout = ir.StridedLayoutAttr.get(offset, new_strides)
+    new_ref_ty = ir.MemRefType.get(
+        new_shape, ref_ty.element_type, new_layout, ref_ty.memory_space
+    )
+    if offset == ir.ShapedType.get_dynamic_stride_or_offset():
+      _, dyn_offset, *_ = memref.extract_strided_metadata(ref)  # pyrefly: ignore[not-iterable]
+      offsets = [dyn_offset]
+    else:
+      offsets = []
+    return memref.reinterpret_cast(
+        new_ref_ty, ref, offsets, [], [],
+        static_offsets=[offset],
+        static_sizes=new_shape,
+        static_strides=new_strides,
+    )
+
+  def transform_gmem_shape(self, shape: Sequence[int]) -> tuple[int, ...]:
+    return self.transform_shape(shape)
+
+  def transform_index(self, idx: Sequence[ir.Value]) -> tuple[ir.Value, ...]:
+    return tuple(v for i, v in enumerate(idx) if i not in self.unit_dims)
+
+  def transform_shape(self, shape: Sequence[int]) -> tuple[int, ...]:
+    for d in self.unit_dims:
+      if shape[d] != 1:
+        raise ValueError(
+            f"Expected dimension {d} to have size 1 in shape {shape}, but got"
+            f" {shape[d]}"
+        )
+    return tuple(v for i, v in enumerate(shape) if i not in self.unit_dims)
 
   def batch(self, leading_rank: int) -> MemRefTransform:
     raise NotImplementedError  # Unused
@@ -446,9 +512,10 @@ class Scratch:
     gpu_launch_op = self._find_first_op(gpu.LaunchOp, self._module_op.body)
     assert gpu_launch_op is not None
 
-    ptr_ty = ir.Type.parse("!llvm.ptr")
-    empty_arr_ty = ir.Type.parse("!llvm.array<0 x i8>")
+    i8 = ir.IntegerType.get_signless(8)
     i64 = ir.IntegerType.get_signless(64)
+    ptr_ty = llvm.PointerType.get()
+    empty_arr_ty = llvm.ArrayType.get(i8, 0)
 
     with ir.InsertionPoint(gpu_launch_op):
       alloc_op = llvm.AllocaOp(
@@ -494,9 +561,11 @@ class Scratch:
       return
     alloc_op, load_op, _ = self._find_alloc_load_and_device_ptr()
 
+    i8 = ir.IntegerType.get_signless(8)
+
     with ir.InsertionPoint(load_op):
       gmem_scratch_bytes = self.next_offset
-      scratch_arr_ty = ir.Type.parse(f"!llvm.array<{gmem_scratch_bytes} x i8>")
+      scratch_arr_ty = llvm.ArrayType.get(i8, gmem_scratch_bytes)
       alloc_op.elem_type = ir.TypeAttr.get(scratch_arr_ty)
       load_op.result.set_type(scratch_arr_ty)
       for init_callback in self.host_init:
@@ -652,7 +721,7 @@ class LaunchContext:
   def host_collective_metadata(self) -> ir.Value | None:
     if self.device_collective_metadata is None:
       return None
-    ptr_ty = ir.Type.parse("!llvm.ptr")
+    ptr_ty = llvm.PointerType.get()
     metadata_ty = ir.MemRefType.get(
       (get_collective_metadata_size(self.num_params, self.num_peers),),
       ir.IntegerType.get_signless(64),
@@ -676,7 +745,7 @@ class LaunchContext:
     kernel launch.
     """
     i8 = ir.IntegerType.get_signless(8)
-    ptr_ty = ir.Type.parse("!llvm.ptr")
+    ptr_ty = llvm.PointerType.get()
     if alignment is None:
       alignment = size
     if self.scratch.next_offset % alignment:
@@ -763,7 +832,7 @@ class LaunchContext:
     if (tma_desc := self.tma_descriptors.get(tma_desc_key, None)) is None:
       i32 = ir.IntegerType.get_signless(32)
       i64 = ir.IntegerType.get_signless(64)
-      ptr_ty = ir.Type.parse("!llvm.ptr")
+      ptr_ty = llvm.PointerType.get()
       def init_tma_desc(host_ptr: ir.Value):
         ref = gmem_ref
         for t in gmem_transform:
@@ -1002,18 +1071,51 @@ class LaunchContext:
     # We don't need to do this for gather TMAs, because we'll unroll the
     # transfers ourselves anyway.
     num_squeezed_dims = len(squeezed_dims)
-    if len(slice_shape) > 5 and gather_indices is None:
-      # We can try to collapse all squeezed dims into one.
-      if len(slice_shape) - num_squeezed_dims + 1 > 5:
-        raise ValueError(
-            "Async copies only support striding up to 5 dimensions"
+    if gather_indices is None:
+      # Drop as many unit-sized dimensions from the transformed shape as we can.
+      gmem_shape = tuple(gmem_ref_ty.shape)
+      for t in gmem_transform:
+        gmem_shape = t.transform_gmem_shape(gmem_shape)
+      # The slice shape may pad along 1-sized dimensions. In that case, we do
+      # not drop them.
+      unit_dims = tuple(
+          i for i, (gs, ss) in enumerate(zip(gmem_shape, slice_shape, strict=True))
+          if gs == 1 and ss == 1
+      )
+      # When issuing an `async_prefetch`, there is no SMEM reference to
+      # transform.
+      if smem_ref is not None:
+        # We need to apply this transform to the SMEM ref as well. The SMEM ref
+        # is expected to have the same shape as the transformed slice shape,
+        # without squeezed dimensions.
+        assert ir.MemRefType(smem_ref.type).shape == slice_shape[num_squeezed_dims:]
+        smem_unit_dims = tuple(
+            i - num_squeezed_dims for i in unit_dims if i - num_squeezed_dims >= 0
         )
-      squeezed_dim_strides = tuple(gmem_strides[d] for d in squeezed_dims)
-      collapse = CollapseLeadingIndicesTransform(squeezed_dim_strides)
-      gmem_transform = (*gmem_transform, collapse)
-      dyn_base_indices = collapse.transform_index(dyn_base_indices)
-      slice_shape = list(collapse.transform_shape(tuple(slice_shape)))
-      num_squeezed_dims = 1
+        smem_ref = DropUnitDimsTransform(smem_unit_dims).apply(smem_ref)
+      drop = DropUnitDimsTransform(unit_dims)
+      gmem_transform = (*gmem_transform, drop)
+      dyn_base_indices = drop.transform_index(dyn_base_indices)
+      slice_shape = list(drop.transform_shape(slice_shape))
+      # After _prepare_async_copy, squeezed dims have been permuted to the
+      # front (via a TransposeTransform in gmem_transform). So in the
+      # transformed shape, they occupy the first `num_squeezed_dims`
+      # positions.
+      # TODO(bchetioui): move the creation of the `TransposeTransform`
+      # here instead of in _prepare_async_copy.
+      squeezed_dims = tuple(d for i, d in enumerate(squeezed_dims) if i not in unit_dims)
+      num_squeezed_dims = len(squeezed_dims)
+      if len(slice_shape) > 5 and squeezed_dims:
+        # We can try to collapse all squeezed dims into one.
+        squeezed_dim_strides = tuple(gmem_strides[d] for d in squeezed_dims)
+        collapse = CollapseLeadingIndicesTransform(squeezed_dim_strides)
+        gmem_transform = (*gmem_transform, collapse)
+        dyn_base_indices = collapse.transform_index(dyn_base_indices)
+        slice_shape = list(collapse.transform_shape(tuple(slice_shape)))
+        num_squeezed_dims = 1
+      if len(slice_shape) > 5:
+        raise ValueError("Async copies only support striding up to 5 dimensions")
+    del squeezed_dims
 
     # pyrefly: ignore[redefinition]
     dyn_base_indices: list[ir.Value] = list(dyn_base_indices)
@@ -1271,9 +1373,9 @@ class LaunchContext:
           )
         gmem_base_ptr = utils.memref_ptr(gmem_ref)
         gmem_base_ptr = llvm.addrspacecast(
-            ir.Type.parse("!llvm.ptr<1>"), gmem_base_ptr
+            llvm.PointerType.get(address_space=1), gmem_base_ptr
         )
-        smem_base_ptr = utils.memref_ptr(smem_ref, memory_space=3)
+        smem_base_ptr = utils.memref_ptr(smem_ref)
         bytes_per_transfer = layout.vec_size * element_bitwidth // 8
         cache_modifier = (
             nvvm.LoadCacheModifierKind.CG
@@ -1300,7 +1402,7 @@ class LaunchContext:
         gmem_strides = gmem_ref_ty.get_strides_and_offset()[0]
         dst_tiled_strides = [
             arith.constant(i32, s)
-            for s in layout.tiling.tile_strides(gmem_strides)[gmem_ref_ty.rank :]
+            for s in layout.tiling.tile_strides(tuple(gmem_strides))[gmem_ref_ty.rank :]
         ]
         lane_offset = utils.dyn_dot(layout.lane_indices(), dst_tiled_strides)
         warp_offset = utils.dyn_dot(layout.warp_indices(), dst_tiled_strides)
@@ -1312,7 +1414,9 @@ class LaunchContext:
             smem_ref, swizzle, layout, tuple(gmem_ref_ty.shape), optimized=False
         )
         gmem_base_ptr = utils.getelementptr(utils.memref_ptr(gmem_ref), [dyn_offset], gep_type)
-        gmem_base_ptr = llvm.addrspacecast(ir.Type.parse("!llvm.ptr<1>"), gmem_base_ptr)
+        gmem_base_ptr = llvm.addrspacecast(
+            llvm.PointerType.get(address_space=1), gmem_base_ptr
+        )
         bytes_per_transfer = layout.vector_length * element_bitwidth // 8
         # Only 16-byte transfers can skip the L1 cache (this is what CG means).
         cache_modifier = (
@@ -1331,6 +1435,7 @@ class LaunchContext:
       return
 
     assert implementation == AsyncCopyImplementation.TMA
+    del smem_ref_ty
 
     (smem_ref, slice_shape, dyn_base_indices, gmem_transform) = (
         self._prepare_tma(
@@ -1347,8 +1452,8 @@ class LaunchContext:
         )
     )
     assert smem_ref is not None  # For type checkers.
-
-    smem_strides, _ = ir.MemRefType(smem_ref.type).get_strides_and_offset()
+    smem_ref_ty = ir.MemRefType(smem_ref.type)
+    smem_strides, _ = smem_ref_ty.get_strides_and_offset()
     if any(
         s != cs and d != 1  # Strides don't matter for dims of size 1.
         for s, cs, d in zip(
@@ -1395,7 +1500,7 @@ class LaunchContext:
       # The rest can be anything, and we will unroll the transfers over them.
       if smem_ref is src_ref:
         raise NotImplementedError("Scatter unsupported for the TMA implementation")
-      assert barrier is not None  # for pytype
+      assert barrier is not None
       barrier_ptr = barrier.get_ptr()
       if squeezed_dims:
         raise NotImplementedError("Gather/scatter unsupported when using integer indexing")
@@ -1503,7 +1608,7 @@ class LaunchContext:
           # We should really take a slice here, but it doesn't matter. We're
           # just going to take the base pointer anyway.
           transfer_smem_ref = utils.memref_slice(smem_ref, smem_indices)
-          smem_ptr = utils.memref_ptr(transfer_smem_ref, memory_space=3)
+          smem_ptr = utils.memref_ptr(transfer_smem_ref)
           # The slice index needs to be folded into the gather col index.
           col_slice_offset = sum(
               idx * stride
@@ -1524,7 +1629,7 @@ class LaunchContext:
 
     assert gather_indices is None  # Only tiled TMA handled below.
 
-    smem_ptr = utils.memref_ptr(smem_ref, memory_space=3)
+    smem_ptr = utils.memref_ptr(smem_ref)
     if isinstance(predicate, _DefaultPredicate):
       predicate = utils.single_thread_predicate(utils.ThreadSubset.WARPGROUP)
     if predicate is None:
@@ -1599,7 +1704,7 @@ class LaunchContext:
           gmem_base_ptr = utils.memref_ptr(remote_ref)
 
       if gmem_ref is src_ref:
-        assert barrier is not None  # for pytype
+        assert barrier is not None
         barrier_ptr = barrier.get_ptr()
         if arrive:
           utils.nvvm_mbarrier_arrive_expect_tx(
@@ -1650,7 +1755,7 @@ class LaunchContext:
         arith.index_cast(i32, idx) for idx in reversed(dyn_base_indices)
     ]
     if gmem_ref is src_ref:
-      assert barrier is not None  # for pytype
+      assert barrier is not None
       barrier_ptr = barrier.get_ptr()
       assert reduction_op is None
       if collective_size > 1 and leader_tracked is not None:
@@ -1942,7 +2047,7 @@ class LaunchContext:
 
     if collective_metadata is None:
       self._ensure_nvshmem_decls()
-      if ref.type != ir.Type.parse("!llvm.ptr"):
+      if ref.type != llvm.PointerType.get():
         raise ValueError(f"Unsupported type for to_remote: {ref.type}")
       if peer.type != i32:
         raise ValueError(f"peer index must be an i32, got {peer.type}")
@@ -2013,7 +2118,7 @@ class LaunchContext:
       parameter_uses_multimem = np.zeros(self.num_params, dtype=np.int64)
 
     parameter_uses_multimem[parameter_id] = 1
-    module_attributes[MULTIMEM_ARGS_ATTR] = ir.DenseIntElementsAttr.get(  # pyrefly: ignore[no-matching-overload]
+    module_attributes[MULTIMEM_ARGS_ATTR] = ir.DenseIntElementsAttr.get(
         parameter_uses_multimem
     )
 
@@ -2039,9 +2144,7 @@ class LaunchContext:
         utils.memref_ptr(ref), parameter_on_current_device
     )
     multimem_address = arith.addi(multimem_ptr, ref_offset)
-
-    ptr_type = ir.Type.parse("!llvm.ptr")
-    multimem_ptr = llvm.inttoptr(ptr_type, multimem_address)
+    multimem_ptr = llvm.inttoptr(llvm.PointerType.get(), multimem_address)
     return utils.MultimemRef(utils.ptr_as_memref(multimem_ptr, result_type))
 
   def device_id(self, on_host: bool = False) -> ir.Value:

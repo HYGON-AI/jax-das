@@ -46,8 +46,8 @@ from jax._src import tree_util
 from jax._src import util
 from jax._src.typing import ArrayLike
 from jax._src.interpreters import mlir
-from jax._src.layout import Format, Layout, AutoLayout
-from jax._src.sharding_impls import UnspecifiedValue, AUTO
+from jax._src.layout import Format, Layout, AutoLayoutSingleton
+from jax._src.sharding_impls import UnspecifiedValue
 from jax._src.lib.mlir import ir
 from jax._src.lib import _jax
 from jax._src.lib import xla_client as xc
@@ -381,7 +381,7 @@ def _traced_args_info(self):
 def _traced_out_info(self):
   out_shardings = [None if isinstance(s, UnspecifiedValue) else s
                    for s in self._params['out_shardings']]
-  out_layouts = [None if isinstance(l, AutoLayout) else l
+  out_layouts = [None if isinstance(l, AutoLayoutSingleton) else l
                  for l in self._params['out_layouts']]
   out = []
   for a, out_s, out_l in zip(self.jaxpr.out_avals, out_shardings, out_layouts):
@@ -421,7 +421,7 @@ class Traced(Stage):
 
   jaxpr = property(lambda self: self._params['jaxpr'])
   fun_name = property(lambda self: self._params['name'])
-  args_info = property(_traced_args_info)
+  args_info = property(_traced_args_info)  # pyrefly: ignore[bad-override]
   out_info = property(_traced_out_info)
   _num_consts = property(lambda self: len(self._consts))
 
@@ -449,7 +449,7 @@ class Traced(Stage):
 
     # TODO(mattjj): when pmap is deleted, merge with pjit.py BUILD rule
     from jax._src.interpreters import partial_eval as pe  # type:ignore
-    from jax._src.pjit import _lojax_expand_params  # pytype: disable=import-error
+    from jax._src.pjit import _lojax_expand_params  # pyrefly: ignore[missing-import]
     hi_jaxpr = self.jaxpr
     _, closed_over_himutables = pe.convert_const_himutables(hi_jaxpr)
     if closed_over_himutables: raise NotImplementedError  # TODO(mattjj)
@@ -482,7 +482,7 @@ class Traced(Stage):
     if _private_parameters is None:
       _private_parameters = mlir.LoweringParameters()
     try:
-      from jax._src.pjit import _resolve_and_lower  # pytype: disable=import-error
+      from jax._src.pjit import _resolve_and_lower  # pyrefly: ignore[missing-import]
       lowering = _resolve_and_lower(
           lo._meta_tys_flat, **lo._params, lowering_platforms=lowering_platforms,
           lowering_parameters=_private_parameters, pgle_profiler=None)
@@ -571,8 +571,8 @@ class Lowered(Stage):
     out_layouts = self._lowering.compile_args["out_layouts"]
     outs = []
     for o, l, s in zip(out_avals, out_layouts, out_shardings):
-      s = None if isinstance(s, (UnspecifiedValue, AUTO)) else s
-      l = None if isinstance(l, AutoLayout) else l
+      s = None if isinstance(s, UnspecifiedValue) else s
+      l = None if isinstance(l, AutoLayoutSingleton) else l
       format = Format(l, s)
       outs.append(core.ShapeDtypeStruct(o.shape, o.dtype, sharding=format))
     return self.out_tree.unflatten(outs)

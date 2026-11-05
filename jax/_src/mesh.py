@@ -24,6 +24,7 @@ import functools
 import math
 import threading
 from typing import Any, NamedTuple
+import warnings
 
 import numpy as np
 
@@ -297,6 +298,10 @@ class Mesh(BaseMesh, contextlib.ContextDecorator):
   def __enter__(self):
     if jax_config.disallow_mesh_context_manager.value:
       raise RuntimeError("Mesh context manager is disabled.")
+    warnings.warn(
+        "`with mesh:` context manager has been deprecated. Please use `with"
+        " jax.set_mesh(mesh):` instead.",
+        category=DeprecationWarning, stacklevel=2)
     new_env = thread_resources.stack[-1].with_mesh(self)
     thread_resources.stack.append(new_env)
     thread_resources.env = new_env
@@ -412,7 +417,7 @@ class Mesh(BaseMesh, contextlib.ContextDecorator):
       else:
         num_cores = None
       abstract_device = AbstractDevice(
-          device_kind=d.device_kind, num_cores=num_cores)
+          device_kind=d.device_kind, num_cores=num_cores, platform=d.platform)
     return AbstractMesh(
         self.axis_sizes, self.axis_names, axis_types=self.axis_types,
         abstract_device=abstract_device)
@@ -433,12 +438,14 @@ thread_resources = _ThreadResourcesLocalState()
 class AbstractDevice:
   device_kind: str
   num_cores: int | None
+  platform: str
 
   def __repr__(self):
     return (f"AbstractDevice({self._repr()})")
 
   def _repr(self):
-    return f"device_kind={self.device_kind}, num_cores={self.num_cores}"
+    return (f"device_kind={self.device_kind}, num_cores={self.num_cores}, "
+            f"platform={self.platform}")
 
 
 @immutable

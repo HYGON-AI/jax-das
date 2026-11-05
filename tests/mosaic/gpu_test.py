@@ -141,13 +141,8 @@ def copy(src: ir.Value, dst: ir.Value, swizzle: int | None = None):
           ir.StridedLayoutAttr.get(0, new_strides),
           ref_ty.memory_space,
       )
-      ptr_space = 3 if utils.is_smem_ref(ref_ty) else None
-      return ptr_as_memref(
-          # NOTE: memref_ptr applies the offset in case there was any.
-          memref_ptr(ref, memory_space=ptr_space),
-          new_ref_ty,
-          ptr_memory_space=ptr_space,
-      )
+      # NOTE: memref_ptr applies the offset in case there was any.
+      return ptr_as_memref(memref_ptr(ref), new_ref_ty)
     src = bitcast(src)
     dst = bitcast(dst)
     bw = 8
@@ -532,7 +527,8 @@ class MemRefTest(TestCase):
           swizzle=128,
           optimized=False,
       )
-      barrier.arrive_expect_tx(math.prod(a.shape) * mgpu.bitwidth(a.mlir_dtype) // 8 // 128)
+      peer_barrier = barrier.remap_to_cluster(gpu.Dimension.x, peer_idx)
+      peer_barrier.arrive_expect_tx(math.prod(a.shape) * mgpu.bitwidth(a.mlir_dtype) // 8 // 128)
       a.store_tiled_async(
           smem,
           barrier,
@@ -3510,6 +3506,23 @@ class BarrierTest(TestCase):
 
     np.testing.assert_array_equal(y, np.array(1, dtype=np.int32))
 
+  def test_multiple_barriers_requires_explicit_indexing(self):
+    def kernel(ctx, out, barrier):
+      del ctx, out
+      barrier.arrive()
+
+    with self.assertRaisesRegex(
+        ValueError, "Operation is only valid for a single barrier"
+    ):
+      mgpu.as_gpu_kernel(
+          kernel,
+          (1, 1, 1),
+          (128, 1, 1),
+          (),
+          jax.ShapeDtypeStruct((), jnp.int32),
+          mgpu.Barrier(arrival_count=1, num_barriers=3),
+      )()
+
 
 class AsyncCopyTest(TestCase, jtu.CudaArchSpecificTest):
 
@@ -3532,6 +3545,25 @@ class AsyncCopyTest(TestCase, jtu.CudaArchSpecificTest):
     smem = (x, mgpu.TMABarrier())
     y = mgpu.as_gpu_kernel(kernel, (1, 1, 1), (128, 1, 1), x, x, smem)(x)
     np.testing.assert_array_equal(y, x)
+
+  def test_tma_load_oob_over_trivial_gmem_dimension(self):
+    src_shape = (64, 1, 64)
+    dst_shape = (64, 2, 64)
+    i1 = ir.IntegerType.get_signless(1)
+    def kernel(ctx: launch_context.LaunchContext, src, dst, smem):
+      tmp, barrier = smem
+      ctx.async_copy(
+          src_ref=src, dst_ref=tmp, swizzle=None, barrier=barrier,
+          # Deliberately use a `gmem_slice` that is larger than the source GMEM.
+          gmem_slice=(slice(None), slice(0, 2), slice(None)))
+      barrier.wait_parity(c(0, i1))
+      copy(tmp, dst, swizzle=None)
+    x = np.arange(np.prod(src_shape), dtype=jnp.float32).reshape(src_shape)
+    out_shape = jax.ShapeDtypeStruct(dst_shape, jnp.float32)
+    smem = (out_shape, mgpu.TMABarrier())
+    y = mgpu.as_gpu_kernel(kernel, (1, 1, 1), (128, 1, 1), x, out_shape, smem)(x)
+    np.testing.assert_array_equal(y[:, 0, :], x[:, 0, :])
+    np.testing.assert_array_equal(y[:, 1, :], 0.0)
 
   @parameterized.product(
       swizzle=(None, 32, 64, 128),
@@ -4242,17 +4274,20 @@ class FragmentedArrayTest(TestCase):
 
   @parameterized.product(
       vec_size=(4, 3, 1),
-      dtype=(jnp.float16, jnp.bfloat16),
+      dtype=(jnp.float16, jnp.bfloat16, jnp.float8_e4m3fn, jnp.float8_e5m2, jnp.float4_e2m1fn),
   )
-  def test_abs_ptx(self, vec_size, dtype):
-      def kernel(ctx, src, dst, _):
-        src = fa.FragmentedArray.load_strided(src, vec_size=vec_size)
-        src.abs().store_untiled(dst)
-      x = self.prng.uniform(-1, 1, (12 * 128,)).astype(dtype)
-      f = mgpu.as_gpu_kernel(
-          kernel, (1, 1, 1), (128, 1, 1), x, x, ()
-      )
-      np.testing.assert_array_equal(f(x), np.abs(x))
+  def test_float_abs(self, vec_size, dtype):
+    if vec_size * bitwidth(dtype_to_ir_type(dtype)) % 8:
+      self.skipTest("Vector length must be multiple of byte size")
+    def kernel(ctx, src, dst, _):
+      src = fa.FragmentedArray.load_strided(src, vec_size=vec_size)
+      src.abs().store_untiled(dst)
+    x = jnp.asarray(self.prng.uniform(-4, 4, (12 * 128,))).astype(dtype)
+    f = mgpu.as_gpu_kernel(
+        kernel, (1, 1, 1), (128, 1, 1), x, x, ()
+    )
+    expected = jnp.abs(x.astype(np.float32)).astype(x.dtype)
+    np.testing.assert_array_equal(f(x), expected)
 
   def test_minimum_np_compatibility(self):
     one = np.ones((128, 128)).astype(np.float32)
@@ -4351,9 +4386,8 @@ class FragmentedArrayTest(TestCase):
     np.testing.assert_array_equal(result, op(iota, rhs).astype(jnp.int8))
 
   @parameterized.product(
-      # TODO(apaszke): Add float16
-      jax_dtype_from=(jnp.float32, jnp.bfloat16, jnp.float8_e5m2, jnp.float8_e4m3fn, jnp.float8_e8m0fnu),
-      jax_dtype_to=(jnp.float32, jnp.bfloat16, jnp.float8_e5m2, jnp.float8_e4m3fn, jnp.float8_e8m0fnu),
+      jax_dtype_from=(jnp.float32, jnp.float16, jnp.bfloat16, jnp.float8_e5m2, jnp.float8_e4m3fn, jnp.float8_e8m0fnu),
+      jax_dtype_to=(jnp.float32, jnp.float16, jnp.bfloat16, jnp.float8_e5m2, jnp.float8_e4m3fn, jnp.float8_e8m0fnu),
       vec_len=(1, 2, 4, 8),
   )
   def test_conversion_f8_(self, jax_dtype_from, jax_dtype_to, vec_len):
@@ -4406,7 +4440,47 @@ class FragmentedArrayTest(TestCase):
     res = mgpu.as_gpu_kernel(
         kernel, (1, 1, 1), (128, 1, 1), values, expected, ()
     )(values)
-    self.assertTrue(np.array_equal(res, expected, equal_nan=True))
+    # assert_array_equal fails when both sides are NaN.
+    np.testing.assert_allclose(res, expected, atol=0, rtol=0, equal_nan=True)
+
+  @parameterized.product(
+      jax_wide_dtype=(jnp.float32, jnp.float16, jnp.bfloat16, jnp.float8_e5m2, jnp.float8_e4m3fn),
+      to_narrow=(False, True),
+      vec_len=(2, 4, 8),
+  )
+  def test_conversion_f4_(self, jax_wide_dtype, to_narrow, vec_len):
+    if not jtu.is_cuda_compute_capability_at_least("10.0"):
+      self.skipTest("f4 conversions not supported on pre-Blackwell GPUs")
+
+    if to_narrow:
+      jax_dtype_from = jax_wide_dtype
+      jax_dtype_to = jnp.float4_e2m1fn
+    else:
+      jax_dtype_from = jnp.float4_e2m1fn
+      jax_dtype_to = jax_wide_dtype
+
+    layout = fa.tmem_native_layout(vec_len)
+    mlir_dtype_to = utils.dtype_to_ir_type(jax_dtype_to)
+    m = 128
+    n = 64
+    def kernel(ctx, inp, out, smem):
+      del ctx, smem
+      t = mgpu.FragmentedArray.load_untiled(inp, layout=layout, optimized=False)
+      t = t.astype(mlir_dtype_to)
+      t.store_untiled(out, optimized=False)
+
+    iota_part = np.tile(np.arange(-8, 8, dtype=np.int8), ((m // 2) * n) // 16).reshape(m // 2, n)
+    random_part = self.prng.integers(low=-8, high=8, size=(m // 2, n), dtype=np.int8)
+    bits = np.concatenate([iota_part, random_part], axis=0)
+    bits = jnp.asarray(bits).astype(jnp.int4)
+    f4_values = jax.lax.bitcast_convert_type(bits, jnp.float4_e2m1fn)
+
+    values = f4_values.astype(jax_dtype_from)
+    expected = values.astype(jax_dtype_to)
+    res = mgpu.as_gpu_kernel(
+        kernel, (1, 1, 1), (128, 1, 1), values, expected, ()
+    )(values)
+    np.testing.assert_array_equal(res, expected)
 
   def test_rounding_f8e8m0fnu(self):
     if not jtu.is_cuda_compute_capability_at_least("10.0"):
@@ -4616,6 +4690,22 @@ class FragmentedArrayTest(TestCase):
         kernel, (1, 1, 1), (128, 1, 1), in_shape, out_shape, ()
     )
     x = np.arange(math.prod(in_shape.shape), dtype=jnp.int32).reshape(in_shape.shape)
+    np.testing.assert_array_equal(kernel_fn(x), x[:, 1])
+
+  def test_strided_copy_noncontig_subbyte(self):
+    def kernel(ctx, src, dst, _):
+      src_slice = mgpu.memref_slice(src, (slice(None), 1))
+      mgpu.FragmentedArray.load_strided(src_slice, is_signed=True, vec_size=4).store_untiled(dst)
+
+    in_shape = jax.ShapeDtypeStruct((32, 2, 256), jnp.int4)
+    out_shape = jax.ShapeDtypeStruct((32, 256), jnp.int4)
+
+    kernel_fn = mgpu.as_gpu_kernel(
+        kernel, (1, 1, 1), (128, 1, 1), in_shape, out_shape, ()
+    )
+    x = jax.random.randint(
+        jax.random.key(42), in_shape.shape, -128, 127, dtype=in_shape.dtype
+    )
     np.testing.assert_array_equal(kernel_fn(x), x[:, 1])
 
   def test_strided_copy_noncontig_bad(self):
@@ -5413,6 +5503,38 @@ class ProfilerTest(TestCase, jtu.JaxTestCase):
         self.assertEqual(data.count('"name": "load"'), 2)
         self.assertEqual(data.count('"name": "store"'), 2)
 
+  def test_profiler_per_warp(self):
+    def body(ctx, input, result, scratch):
+      del scratch
+      with ctx.named_region("load"):
+        reg = mgpu.FragmentedArray.load_strided(input)
+      with ctx.named_region("store"):
+        reg.store_untiled(result)
+
+    dtype = jnp.bfloat16
+    shape = (128, 128)
+    jax_shape = jax.ShapeDtypeStruct(shape, dtype)
+    with tempfile.TemporaryDirectory() as tmpdir:
+      kernel = mgpu.as_gpu_kernel(
+          body,
+          grid=(1, 1, 1),
+          block=(128, 1, 1),
+          in_shape=(jax_shape),
+          out_shape=jax_shape,
+          smem_scratch_shape=[],
+          prof_spec=profiler.ProfilerSpec(
+              1024, dump_path=tmpdir, trace_scope=mgpu.ThreadSubset.WARP
+          ),
+      )
+      param = self.prng.uniform(-1, 1, shape).astype(dtype)
+      self.assertArraysEqual(kernel(param), param)
+      [name] = os.listdir(tmpdir)
+      with open(os.path.join(tmpdir, name)) as f:
+        data = f.read()
+        # 4 warps in a block of 128 threads.
+        self.assertEqual(data.count('"name": "load"'), 8)
+        self.assertEqual(data.count('"name": "store"'), 8)
+
 
 class LayoutTest(TestCase):
 
@@ -5759,9 +5881,6 @@ class MosaicGpuDialectTest(TestCase, jtu.JaxTestCase):
   def setUp(self):
     if mgpu_dialect is None:
       raise self.skipTest("Test requires Mosaic GPU dialect")
-    # TODO(b/415721295): remove this check once minimum jaxlib version is 0.10.0.
-    if not hasattr(mgpu_dialect, "WarpMapOp"):
-      self.skipTest("mgpu.dialect has a backward incompatible change.")
     super().setUp()
 
   @parameterized.product(
@@ -5774,11 +5893,14 @@ class MosaicGpuDialectTest(TestCase, jtu.JaxTestCase):
       self.skipTest("WG_SPLAT is not supported for `vector.load`.")
     # We don't infer optimized transfer-compatible transforms for load/store to
     # registers with TCGEN05_TMEM_NATIVE layout.
-    if optimized and layout == mtu.RegisterLayout.TCGEN05_TMEM_NATIVE:
+    load_optimized = optimized != False
+    if load_optimized and layout == mtu.RegisterLayout.TCGEN05_TMEM_NATIVE:
       self.skipTest(
           "Optimized loads not supported for TCGEN05_TMEM_NATIVE layout"
       )
-    shape = (128, 128)
+    # Use a 3D shape to exercise the path where tiling does not span all
+    # dimensions.
+    shape = (1, 128, 128)
     layout_attr = layout.to_layout_attr(shape, dtype)
 
     def body(ctx, param: ir.Value, result: ir.Value, smem: list[ir.Value]):
@@ -6467,7 +6589,7 @@ class MosaicGpuDialectTest(TestCase, jtu.JaxTestCase):
           result=[],
           operands_=[mbar_ref],
           in_layouts=[],
-          in_transforms=[],
+          in_transforms=[ir.ArrayAttr.get([])],
           out_layouts=[],
       )
       args_ty = [arg.type for arg in op.operands_]
@@ -6799,9 +6921,6 @@ class MosaicGpuDialectSm90ATest(Sm90ATestCase, jtu.JaxTestCase):
   def setUp(self):
     if mgpu_dialect is None:
       raise self.skipTest("Test requires Mosaic GPU dialect")
-    # TODO(b/415721295): remove this check once minimum jaxlib version is 0.10.0.
-    if not hasattr(mgpu_dialect, "WarpMapOp"):
-      self.skipTest("mgpu.dialect has a backward incompatible change.")
     super().setUp()
 
   @parameterized.product(
@@ -8663,6 +8782,8 @@ if hp is not None:
       @hp.example(((128, 128), fa.TMEM_NATIVE_LAYOUT))
       def run(args):
         shape, layout = args
+        # Attempt to avoid spills by keeping the shape small enough.
+        hp.assume(math.prod(shape) <= 128 * 128)
         dtype = jnp.float32
         layout_attr = layouts.to_layout_attr(layout)
 
@@ -8674,7 +8795,9 @@ if hp is not None:
           # Registers -> SMEM
           mgpu_dialect.vector_store(reg, smem)
           # SMEM -> Registers
-          reg = mgpu_dialect.vector_load(smem)
+          # Use a non-optimized load to ensure that we don't fail due to
+          # unoptimizable loads.
+          reg = mgpu_dialect.vector_load(smem, optimized=False)
           reg = mgpu_dialect.layout_cast(reg, layout_attr)
           # Registers -> GMEM
           mgpu_dialect.vector_store(reg, result)

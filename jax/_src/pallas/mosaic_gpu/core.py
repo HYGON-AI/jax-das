@@ -75,6 +75,11 @@ def is_trivial_index(idx, shape) -> bool:
   return idx is ... or (len(shape) == 1 and idx in _slices(shape[0]))
 
 
+class TraceScope(enum.Enum):
+  WARP = "warp"
+  WARPGROUP = "warpgroup"
+
+
 @dataclasses.dataclass(frozen=True, kw_only=True)
 class CompilerParams:
   """Mosaic GPU compiler parameters.
@@ -111,6 +116,7 @@ class CompilerParams:
       single invocation. It is undefined behavior if a thread collects more
       events than this.
     profile_dir: The directory to which profiling traces will be written to.
+    profile_trace_scope: The scope at which traces are collected (WARP or WARPGROUP).
   """
   approx_math: bool = False
   dimension_semantics: Sequence[DimensionSemantics] | None = None
@@ -119,6 +125,7 @@ class CompilerParams:
   reduction_scratch_bytes: int = 128 * 4 * 4
   profile_space: int = 0
   profile_dir: str = ""
+  profile_trace_scope: TraceScope = TraceScope.WARPGROUP
   lowering_semantics: mgpu.core.LoweringSemantics = mgpu.core.LoweringSemantics.Lane
 
   def __post_init__(self):
@@ -148,7 +155,7 @@ class MemorySpace(enum.Enum):
   def __call__(
       self,
       shape: Sequence[int],
-      dtype: jnp.dtype,
+      dtype: jax.typing.DTypeLike,
       *,
       transforms: Sequence[state_types.Transform] = (),
       packed: bool | None = None,
@@ -184,6 +191,9 @@ class MemorySpace(enum.Enum):
     return GPUMemoryRef(jax_core.ShapedArray(shape, dtype), memory_space=self,
                         transforms=transforms, layout=mgpu_layout,
                         collective=collective)
+
+  def like(self, shape_dtype_like):
+    return self(shape_dtype_like.shape, shape_dtype_like.dtype)
 
 
 class SemaphoreType(enum.Enum):
@@ -421,7 +431,7 @@ def _ref_group_tmem_col_size(refs: _GPUMemoryRefTree) -> int:
 
 def infer_tmem_layout(
     shape: tuple[int, ...],
-    dtype: jnp.dtype,
+    dtype: jax.typing.DTypeLike,
     *,
     packed: bool,
     collective: bool) -> tcgen05.TMEMLayout:
@@ -733,6 +743,95 @@ class UntilingTransform(state_types.Transform):
     )
     return new_indexer, self
 
+  def commute_reshape(
+      self, aval: jax_core.ShapedArray, transform: state_types.ReshapeTransform
+  ) -> tuple[state_types.ReshapeTransform, UntilingTransform]:
+    if not transform.shape:
+      raise NotImplementedError(
+          "Commuting a `UntilingTransform` with a `ReshapeTransform` is not "
+          "supported when the target shape has 0 dimensions"
+      )
+    if not self.tiling:
+      raise NotImplementedError(
+          "Commuting a `UntilingTransform` with a `ReshapeTransform` is not "
+          "supported when the tiling is empty"
+      )
+    untiled_aval = self.transform_type(aval)
+    assert isinstance(untiled_aval, jax_core.ShapedArray)
+    components = [[]]
+    # We assume that we support only folds here for the moment. Therefore, we
+    # can gather a number of consecutive dimensions such that their product
+    # equals the dimension currently being processed in the reshaped shape.
+    for d in untiled_aval.shape:
+      reshaped_dim_size = transform.shape[len(components) - 1]
+      components[-1].append(d)
+      component_size = math.prod(components[-1])
+      if component_size == reshaped_dim_size:
+        components.append([])
+      elif component_size > reshaped_dim_size:
+        raise NotImplementedError(
+            "Unfolding dimensions is not supported when commuting an "
+            " `UntilingTransform` with a `ReshapeTransform`"
+        )
+    assert not components[-1]
+    components.pop()
+    assert len(components) == len(transform.shape)
+
+    rev_tiling_to_process = list(self.tiling)[::-1]
+    rev_shape_to_process = untiled_aval.shape[-len(self.tiling):][::-1]
+    rev_new_tiling: list[int] = []
+    rev_new_tiled_dims: list[int] = []
+    for component in components[::-1]:
+      # The construction above should guarantee that there is never an empty
+      # component, which simplifies indexing below.
+      assert component
+      ndim = len(component)
+      if len(rev_tiling_to_process) < ndim:
+        raise NotImplementedError(
+            "Folding tiled dimensions into untiled dimensions is not supported"
+        )
+      rev_tiling_slice = rev_tiling_to_process[:ndim]
+      rev_shape_slice = rev_shape_to_process[:ndim]
+      new_tiling_dim = math.prod(rev_tiling_slice)
+      num_elems = math.prod(rev_shape_slice)
+      assert num_elems % new_tiling_dim == 0
+      new_tiled_dim = num_elems // new_tiling_dim
+      # If any other dimension than the minormost one has non-unit tiling, then
+      # we cannot commute the reshape and untile transforms.
+      #
+      # Note that we could also support the case where we are collapsing
+      # trailing tiled dimensions where the tile size is the dimension size
+      # (i.e. there is a single tile).
+      if any(t != 1 for t in rev_tiling_slice[1:]):
+        before = (
+            *[s // t for s, t in zip(rev_shape_slice, rev_tiling_slice)],
+            *rev_tiling_slice,
+        )
+        after = (new_tiled_dim, new_tiling_dim)
+        raise ValueError(
+            "Cannot commute `UntilingTransform` with `ReshapeTransform` when "
+            "any of the dimensions being collapsed other than the minormost "
+            "one has non-unit tiling. Attempted to reshape tiled slice of "
+            f"shape {before} into shape {after}"
+        )
+      rev_new_tiling.append(new_tiling_dim)
+      rev_new_tiled_dims.append(new_tiled_dim)
+      rev_tiling_to_process = rev_tiling_to_process[ndim:]
+      rev_shape_to_process = rev_shape_to_process[ndim:]
+      if not rev_tiling_to_process:
+        break
+    assert not rev_tiling_to_process
+    assert not rev_shape_to_process
+    new_tiling = tuple(rev_new_tiling[::-1])
+    new_tiled_dims = tuple(rev_new_tiled_dims[::-1])
+    new_shape = (
+        *transform.shape[:len(components) - len(rev_new_tiling)],
+        *new_tiled_dims,
+        *new_tiling,
+    )
+
+    return state_types.ReshapeTransform(new_shape), UntilingTransform(new_tiling)
+
   def pretty_print(self, context: jax_core.JaxprPpContext) -> pp.Doc:
     return pp.text(f"{{untile({list(self.tiling)})}}")
 
@@ -855,6 +954,46 @@ def remote_ref(
     raise ValueError("Can't make a multicast reference into a peer reference.")
   return pallas_core.TransformedRef(
       ref.ref, (*ref.transforms, PeerMemRef(device_id, device_id_type)),
+  )
+
+
+@tree_util.register_dataclass
+@dataclasses.dataclass(frozen=True)
+class ClusterRefTransform(state_types.Transform):
+  dims: tuple[jax_core.AxisName, ...] = dataclasses.field(
+      metadata=dict(static=True)
+  )
+  idxs: tuple[Any, ...]
+
+  def __post_init__(self):
+    if len(self.dims) != len(self.idxs):
+      raise ValueError("dims and idxs must have the same length")
+
+  def transform_type(self, x):
+    return x
+
+  def undo(self, x: jax_core.AbstractValue) -> state_types.Transform:
+    raise NotImplementedError()
+
+  def commute_ndindexer(
+      self, _: jax_core.AbstractValue, indexer: indexing.NDIndexer
+  ) -> tuple[indexing.NDIndexer, ClusterRefTransform]:
+    return indexer, self
+
+
+def cluster_ref(
+    ref: _Ref,
+    block_id: dict[jax_core.AxisName, Any],
+) -> pallas_core.TransformedRef:
+  """Translate memref to a peer memref in the cluster."""
+  if not isinstance(ref, pallas_core.TransformedRef):
+    if not isinstance(jax_core.typeof(ref), state_types.AbstractRef):
+      raise TypeError("ref must be a reference")
+    ref = pallas_core.TransformedRef(ref, transforms=())
+  dims = tuple(block_id.keys())
+  idxs = tuple(block_id.values())
+  return pallas_core.TransformedRef(
+      ref.ref, (*ref.transforms, ClusterRefTransform(dims, idxs)),
   )
 
 
@@ -989,7 +1128,7 @@ class UnswizzleRef(state_types.Transform):
   def undo(self, x: jax_core.AbstractValue) -> state_types.Transform:
     return SwizzleTransform(self.swizzle)
 
-  def swizzle_elems(self, dtype: jnp.dtype | ir.Type) -> int:
+  def swizzle_elems(self, dtype: jax.typing.DTypeLike | ir.Type) -> int:
     if not isinstance(dtype, ir.Type):
       dtype = mgpu_utils.dtype_to_ir_type(dtype)
     return (self.swizzle * 8) // mgpu.bitwidth(dtype)
@@ -1148,54 +1287,60 @@ class Barrier:
     num_arrivals: The number of arrivals that will be recorded by this barrier.
     num_barriers: The number of barriers that will be created. Individual
       barriers can be accessed by indexing into the barrier Ref.
-    orders_tensor_core: If False, a successfull wait from one thread does not
+    orders_tensor_core: If False, a successful wait from one thread does not
       guarantee that the TensorCore-related operations in other threads have
       completed. Similarly, when False any TensorCore operation in the waiting
       thread is allowed to begin before the wait succeeds.
   """
   num_arrivals: int = 1
-  num_barriers: int = 1
+  num_barriers: int | Sequence[int] = 1
   orders_tensor_core: bool = False
+
+  def __post_init__(self):
+    if (n := self.num_arrivals) < 1:
+      raise ValueError(f"Num arrivals must be at least 1, but got {n}")
+
+    if isinstance(self.num_barriers, int):
+      object.__setattr__(self, "num_barriers", (self.num_barriers,))
+    else:
+      object.__setattr__(self, "num_barriers", tuple(self.num_barriers))
 
   def get_array_aval(self) -> jax_core.ShapedArray:
     raise ValueError("Barriers are not arrays")
 
   def get_ref_aval(self) -> state.AbstractRef:
-    aval = jax_core.ShapedArray(
-        [self.num_barriers],
-        BarrierType(
-            self.num_arrivals, orders_tensor_core=self.orders_tensor_core
-        ),
-    )
-    return state.AbstractRef(aval, SMEM)
-
-  def __post_init__(self):
-    if self.num_arrivals < 1:
-      raise ValueError(
-          f"Num arrivals must be at least 1, but got {self.num_arrivals}"
-      )
+    ty = BarrierType(self.num_arrivals, self.orders_tensor_core)
+    return state.AbstractRef(jax_core.ShapedArray(self.num_barriers, ty), SMEM)
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
 class ClusterBarrier:
   collective_axes: tuple[str | tuple[str, ...], ...]
-  num_barriers: int = 1
+  num_barriers: int | Sequence[int] = 1
   num_arrivals: int = 1
   orders_tensor_core: bool = False
   leader_tracked: bool = False
+
+  def __post_init__(self):
+    if (n := self.num_arrivals) < 1:
+      raise ValueError(f"Num arrivals must be at least 1, but got {n}")
+
+    if isinstance(self.num_barriers, int):
+      object.__setattr__(self, "num_barriers", (self.num_barriers,))
+    else:
+      object.__setattr__(self, "num_barriers", tuple(self.num_barriers))
 
   def get_array_aval(self) -> jax_core.ShapedArray:
     raise ValueError("Cluster barriers are not arrays")
 
   def get_ref_aval(self) -> state.AbstractRef:
-    aval = jax_core.ShapedArray(
-        [self.num_barriers],
-        ClusterBarrierType(
-            self.collective_axes, self.num_arrivals,
-            self.orders_tensor_core, self.leader_tracked,
-        ),
+    ty = ClusterBarrierType(
+        collective_axes=self.collective_axes,
+        num_arrivals=self.num_arrivals,
+        orders_tensor_core=self.orders_tensor_core,
+        leader_tracked=self.leader_tracked,
     )
-    return state.AbstractRef(aval, SMEM)
+    return state.AbstractRef(jax_core.ShapedArray(self.num_barriers, ty), SMEM)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1240,7 +1385,7 @@ class WGMMAAbstractAccumulatorRef(state.AbstractRef):
     )
 
   def _getitem(self, tracer, idx):
-    from jax._src.pallas.mosaic_gpu.primitives import wgmma_accumulator_load  # pytype: disable=import-error
+    from jax._src.pallas.mosaic_gpu.primitives import wgmma_accumulator_load  # pyrefly: ignore[missing-import]
     arr = wgmma_accumulator_load(tracer, wait_n=0)
     if not is_trivial_index(idx, tracer.shape):
       arr = arr[idx]
@@ -1248,7 +1393,7 @@ class WGMMAAbstractAccumulatorRef(state.AbstractRef):
     return arr
 
   def _setitem(self, tracer, idx, value):
-    from jax._src.pallas.mosaic_gpu.primitives import wgmma_accumulator_store  # pytype: disable=import-error
+    from jax._src.pallas.mosaic_gpu.primitives import wgmma_accumulator_store  # pyrefly: ignore[missing-import]
     if not is_trivial_index(idx, tracer.shape):
       raise NotImplementedError(
           "Non-trivial indexing on WGMMAAbstractAccumulatorRef is not supported"
@@ -1448,7 +1593,7 @@ def layout_cast(x: Any, new_layout: SomeLayout):
 
 class SomeLayout:
 
-  def reduce(self, axes: int | Sequence[int]) -> "SomeLayout":
+  def reduce(self, axes: int | Sequence[int]) -> SomeLayout:
     if isinstance(axes, int):
       axes = (axes,)
     return ReducedLayout(self, axes)

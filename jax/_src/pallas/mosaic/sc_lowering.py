@@ -16,25 +16,17 @@
 from collections.abc import Sequence
 import dataclasses
 import functools
-import itertools
-from typing import Any, Callable, cast, NoReturn, Mapping
+from typing import Any, NoReturn, cast
 
-from jax._src import api_util
 from jax._src import core as jax_core
 from jax._src import debugging
 from jax._src import lax
-from jax._src import linear_util as lu
-from jax._src import mesh as mesh_lib
 from jax._src import numpy as jnp
-from jax._src import source_info_util
 from jax._src import state
 from jax._src import tree_util
 from jax._src import util
-from jax._src.interpreters import mlir
-from jax._src.interpreters import partial_eval as pe
 from jax._src.lib.mlir import ir
 from jax._src.lib.mlir.dialects import arith
-from jax._src.lib.mlir.dialects import func
 from jax._src.lib.mlir.dialects import memref
 from jax._src.lib.mlir.dialects import vector
 from jax._src.pallas import core as pallas_core
@@ -43,8 +35,6 @@ from jax._src.pallas.mosaic import core as tpu_core
 from jax._src.pallas.mosaic import lowering as tc_lowering
 from jax._src.pallas.mosaic import primitives as tpu_primitives
 from jax._src.pallas.mosaic import sc_core
-from jax._src.pallas.mosaic import tpu_info
-from jax._src.state import discharge as state_discharge
 from jax._src.state import indexing
 from jax._src.state import primitives as state_primitives
 from jax.experimental.mosaic.dialects import tpu
@@ -55,510 +45,18 @@ zip, unsafe_zip = util.safe_zip, zip
 
 
 MemorySpace = tpu_core.MemorySpace
-CoreMemorySpace = tpu_core.CoreMemorySpace
+CoreMemorySpace = pallas_core.CoreMemorySpace
 
 ShapedAbstractValue = tc_lowering.ShapedAbstractValue
+
 LoweringContext = tc_lowering.LoweringContext
 LoweringRuleContext = tc_lowering.LoweringRuleContext
+MosaicGridMapping = tc_lowering.MosaicGridMapping
 
 _dtype_to_ir_type = tc_lowering._dtype_to_ir_type
-_make_index = tc_lowering._make_index
 _transform_ref = tc_lowering._transform_ref
-
-
-def dynamic_shape_replacement_fn(x):
-  return x
-
-
-def _block_spec_from_block_mapping(
-    bm: pallas_core.BlockMapping,
-    which_parallel: Sequence[bool],
-    default_memory_space: MemorySpace,
-    grid: tuple[int | Any, ...] = (),
-) -> pallas_core.BlockSpec:
-  eval_index_map = functools.partial(
-      jax_core.eval_jaxpr,
-      bm.index_map_jaxpr.jaxpr,
-      bm.index_map_jaxpr.consts,
-  )
-
-  def index_map(*indices):
-    # Inject the parallel indices into the sequential ones coming from
-    # `emit_pipeline`.
-    new_indices = util.merge_lists(
-        which_parallel,
-        indices,
-        [
-            0 if isinstance(g, int) and g == 1
-            else pallas_primitives.program_id(axis - 1)
-            for axis, is_parallel, g in zip(
-                itertools.accumulate(which_parallel), which_parallel, grid
-            )
-            if is_parallel
-        ],
-    )
-    return eval_index_map(*new_indices)
-
-  memory_space = bm.transformed_block_aval.memory_space
-  if memory_space is None:
-    memory_space = default_memory_space
-
-  if isinstance(bm, sc_core.BlockMapping):
-    return sc_core.BlockSpec(
-        bm.block_shape,
-        index_map,
-        indexed_by=bm.indexed_by,
-        indexed_dim=bm.indexed_dim,
-        memory_space=memory_space,
-    )
-  return sc_core.BlockSpec(bm.block_shape, index_map, memory_space=memory_space)
-
-
-def _trace_index_map_to_jaxpr(
-    index_map: Callable[..., Any],
-    debug_info: jax_core.DebugInfo,
-    index_map_tree: Any,
-    index_map_avals: Sequence[jax_core.AbstractValue],
-) -> jax_core.ClosedJaxpr:
-  flat_fun, _ = api_util.flatten_fun(
-      lu.wrap_init(index_map, debug_info=debug_info), index_map_tree
-  )
-  index_map_jaxpr, _, consts = pe.trace_to_jaxpr_dynamic(
-      flat_fun, index_map_avals
-  )
-  return jax_core.ClosedJaxpr(index_map_jaxpr, consts)
-
-
-def lower_pipelined_jaxpr_to_module(
-    lowering_context: mlir.LoweringRuleContext,
-    grid_mapping: pallas_core.GridMapping,
-    jaxpr: jax_core.Jaxpr,
-    *,
-    dimension_semantics: Sequence[tpu_core.DimensionSemantics] | None,
-    kernel_type: tpu_core.CoreType,
-    mesh: mesh_lib.Mesh | None = None,
-    dynamic_shape_replacement_enabled: bool = False,
-    use_tc_tiling: bool | None = None,
-    mpmd_meshes: Mapping[tpu_core.CoreType, pallas_core.Mesh],
-) -> ir.Module:
-  module = ir.Module.create()
-  lower_pipelined_jaxpr_into_module(
-      lowering_context,
-      module,
-      grid_mapping,
-      jaxpr,
-      name=mlir.sanitize_name(jaxpr.debug_info.func_name),
-      dimension_semantics=dimension_semantics,
-      kernel_type=kernel_type,
-      mesh=mesh,
-      dynamic_shape_replacement_enabled=dynamic_shape_replacement_enabled,
-      use_tc_tiling=use_tc_tiling,
-      mpmd_meshes=mpmd_meshes,
-  )
-  return module
-
-
-def lower_pipelined_jaxpr_into_module(
-    lowering_context: mlir.LoweringRuleContext,
-    module: ir.Module,
-    grid_mapping: pallas_core.GridMapping,
-    jaxpr: jax_core.Jaxpr,
-    *,
-    name: str,
-    dimension_semantics: Sequence[tpu_core.DimensionSemantics] | None,
-    kernel_type: tpu_core.CoreType,
-    mesh: mesh_lib.Mesh | None = None,
-    dynamic_shape_replacement_enabled: bool = False,
-    use_tc_tiling: bool | None = None,
-    mpmd_meshes: Mapping[tpu_core.CoreType, pallas_core.Mesh],
-) -> None:
-  if dynamic_shape_replacement_enabled:
-    raise NotImplementedError(
-        "Dynamic shape replacement is not supported for SparseCore."
-    )
-
-  grid = grid_mapping.grid
-  block_mappings = grid_mapping.block_mappings
-
-  if dimension_semantics is None:
-    dimension_semantics = ("arbitrary",) * len(grid)
-  dimension_semantics: Sequence[tpu_core.LiteralDimensionSemantics] = tuple(  # pyrefly: ignore[redefinition]
-      map(tc_lowering._canonicalize_dimension_semantic, dimension_semantics)
-  )
-
-  is_semaphore = []
-  for bm in grid_mapping.block_mappings:
-    for bd in bm.block_shape:
-      if not isinstance(bd, (pallas_core.Squeezed, pallas_core.Blocked)):
-        raise NotImplementedError(
-            "Unsupported block dimension type: "
-            f"{type(bd)} for block shape: {bm.block_shape}"
-        )
-    if isinstance(bm, sc_core.BlockMapping) and bm.indexed_by is not None:
-      # TODO(slebedev): Remove this branch once ``pltpu.emit_pipeline`` supports
-      # gathers/scatters.
-      lower_jaxpr_into_module(
-          lowering_context,
-          module,
-          grid_mapping,
-          jaxpr,
-          name=name,
-          dimension_semantics=dimension_semantics,
-          kernel_type=kernel_type,
-          mesh=mesh,
-          mpmd_meshes=mpmd_meshes,
-      )
-      return
-    is_semaphore.append(bm.block_aval.memory_space is MemorySpace.SEMAPHORE)
-
-  # Split out semaphores, because they do not need to be pipelined.
-  block_mappings, sem_block_mappings = util.partition_list(
-      is_semaphore, block_mappings
-  )
-  in_block_mappings, out_block_mappings = util.split_list(
-      block_mappings,
-      [grid_mapping.num_inputs - sum(is_semaphore[: grid_mapping.num_inputs])],
-  )
-
-  assert len(dimension_semantics) == len(grid)
-  which_parallel = [ds != "arbitrary" for ds in dimension_semantics]
-  sequential_grid = tuple(
-      d for axis, d in enumerate(grid) if not which_parallel[axis]
-  )
-  parallel_grid = tuple(
-      d for axis, d in enumerate(grid) if which_parallel[axis]
-  )
-
-  from jax._src.pallas.mosaic import pipeline  # pytype: disable=import-error
-
-  def pipeline_fn(*refs_and_scratch):
-    refs, scratch_refs = util.split_list(refs_and_scratch, [len(is_semaphore)])
-    refs, sem_refs = util.partition_list(is_semaphore, refs)
-
-    def body_fn(indices, *refs):
-      program_ids_template = util.merge_lists(
-          which_parallel, indices, [None] * sum(which_parallel)
-      )
-      assert len(refs) + len(sem_refs) + len(scratch_refs) == len(jaxpr.invars)
-      return pallas_primitives._jaxpr_call(
-          jaxpr,
-          *util.merge_lists(is_semaphore, refs, sem_refs),
-          *scratch_refs,
-          program_ids=program_ids_template,
-      )
-
-    tiling = (
-        tpu_info.Tiling.COMPACT
-        if use_tc_tiling
-        else tpu_info.Tiling.SPARSE_CORE
-    )
-    make_block_spec = functools.partial(
-        _block_spec_from_block_mapping,
-        which_parallel=which_parallel,
-        default_memory_space=MemorySpace.SMEM
-        if kernel_type is tpu_core.CoreType.SC_SCALAR_SUBCORE
-        else MemorySpace.VMEM,
-        grid=grid,
-    )
-    pipeline.emit_pipeline(
-        body_fn,
-        grid=sequential_grid,  # pyrefly: ignore[bad-argument-type]
-        in_specs=map(make_block_spec, in_block_mappings),
-        out_specs=map(make_block_spec, out_block_mappings),
-        tiling=tiling,
-        _explicit_indices=True,
-    )(*refs)
-    return ()  # ``wrap_init`` does not support functions returning None.
-
-  with grid_mapping.trace_env():
-    new_jaxpr, _, new_consts = pe.trace_to_jaxpr_dynamic(
-        lu.wrap_init(
-            pipeline_fn, debug_info=jaxpr.debug_info.with_unknown_names()
-        ),
-        util.merge_lists(
-            is_semaphore,
-            [
-                MemorySpace.HBM(
-                    bm.array_aval.shape, bm.array_aval.dtype
-                ).get_ref_aval()
-                for bm in block_mappings
-            ],
-            [bm.transformed_block_aval for bm in sem_block_mappings],
-        )
-        + jaxpr.in_avals[grid_mapping.slice_scratch_ops],
-    )
-    assert not new_consts
-
-  parallel_index_map_avals, parallel_index_map_tree = tree_util.tree_flatten(
-      ((jax_core.ShapedArray((), jnp.int32),) * len(parallel_grid), {})
-  )
-  parallel_block_mappings = []
-  for bm in block_mappings:
-    debug_info = bm.index_map_jaxpr.jaxpr.debug_info
-    if debug_info.arg_names is not None:
-      debug_info = debug_info._replace(
-          arg_names=tuple(
-              name
-              for name, is_parallel in zip(
-                  debug_info.arg_names, which_parallel
-              )
-              if is_parallel
-          )
-      )
-    with pallas_core.tracing_grid_env(
-        parallel_grid, grid_mapping.vmapped_dims
-    ):
-      new_index_map_jaxpr = _trace_index_map_to_jaxpr(
-          lambda *args: (0,) * len(bm.block_shape),
-          debug_info,
-          parallel_index_map_tree,
-          parallel_index_map_avals,
-      )
-    parallel_block_mappings.append(
-        bm.replace(
-            index_map_jaxpr=new_index_map_jaxpr,
-            block_shape=tuple(map(pallas_core.Blocked, bm.array_aval.shape)),
-            transformed_block_aval=MemorySpace.HBM(
-                bm.array_aval.shape, bm.array_aval.dtype
-            ).get_ref_aval(),
-        )
-    )
-
-  grid_mapping = grid_mapping.replace(
-      grid=parallel_grid,
-      index_map_avals=parallel_index_map_avals,
-      index_map_tree=parallel_index_map_tree,
-      block_mappings=tuple(
-          util.merge_lists(
-              is_semaphore, parallel_block_mappings, sem_block_mappings
-          )
-      ),
-  )
-  dimension_semantics = [
-      ds
-      for axis, ds in enumerate(dimension_semantics)
-      if which_parallel[axis]
-  ]
-  with grid_mapping.trace_env():
-    lower_jaxpr_into_module(
-        lowering_context,
-        module,
-        grid_mapping,
-        new_jaxpr,
-        name=name,
-        dimension_semantics=dimension_semantics,
-        kernel_type=kernel_type,
-        mesh=mesh,
-        mpmd_meshes=mpmd_meshes,
-    )
-
-
-def lower_jaxpr_into_module(
-    lowering_context: mlir.LoweringRuleContext,
-    module: ir.Module,
-    grid_mapping: pallas_core.GridMapping,
-    jaxpr: jax_core.Jaxpr,
-    *,
-    name: str,
-    dimension_semantics: Sequence[tpu_core.DimensionSemantics] | None,
-    kernel_type: tpu_core.CoreType,
-    mesh: mesh_lib.Mesh | None = None,
-    dynamic_shape_replacement_enabled: bool = False,
-    mpmd_meshes: Mapping[tpu_core.CoreType, pallas_core.Mesh],
-):
-  """Lowers a Jaxpr to a Mosaic SparseCore module."""
-  assert mpmd_meshes is not None, "mpmd_meshes must be provided."
-  if dynamic_shape_replacement_enabled:
-    raise NotImplementedError(
-        "Dynamic shape replacement is not supported for SparseCore."
-    )
-
-  backend = lowering_context.module_context.get_backend(optional=True)
-  mosaic_grid_mapping = MosaicGridMapping(
-      jaxpr,
-      grid_mapping,
-      dimension_semantics,
-      mesh=mesh,
-      kernel_type=kernel_type,
-  )
-  sym_tab = ir.SymbolTable(module.operation)
-  func_op = lower_jaxpr_to_func(
-      jaxpr,
-      name=name,
-      kernel_type=kernel_type,
-      mosaic_grid_mapping=mosaic_grid_mapping,
-      forward_compatible=lowering_context.is_forward_compat(),
-      backend=backend,
-      mpmd_meshes=mpmd_meshes,
-  )
-  module.body.append(func_op)
-  sym_tab.insert(func_op)
-  assert mosaic_grid_mapping.grid is not None
-  assert all(isinstance(d, int) for d in mosaic_grid_mapping.grid)
-  func_op.attributes["iteration_bounds"] = ir.DenseI64ArrayAttr.get(
-      cast(tuple[int, ...], mosaic_grid_mapping.grid)
-  )
-  func_op.attributes["dimension_semantics"] = (
-      mosaic_grid_mapping.get_dimension_semantics()
-  )
-  if not mosaic_grid_mapping.grid:
-    # No need for "window_params" if the grid is empty.
-    return
-  window_params = []
-  for i, bm in enumerate(grid_mapping.block_mappings):
-    func_name = f"{name}_transform_{i}"
-    mlir_func = tc_lowering.lower_jaxpr_to_transform_func(
-        bm.index_map_jaxpr.jaxpr,
-        bm.block_aval,
-        name=func_name,
-        mosaic_grid_mapping=mosaic_grid_mapping,
-        kernel_type=kernel_type,
-        forward_compatible=lowering_context.is_forward_compat(),
-        backend=backend,
-        dynamic_shape_replacement_fn=dynamic_shape_replacement_fn,
-        mpmd_meshes=mpmd_meshes,
-    )
-    mlir_func.attributes["sc.is_transform_indices"] = ir.UnitAttr.get()
-    assert mlir_func.verify(), mlir_func
-    module.body.append(mlir_func)
-    assert func_name not in sym_tab
-    sym_tab.insert(mlir_func)
-
-    block_shape = list(pallas_core._get_block_shape(bm.block_shape))
-    block_params = dict[str, ir.Attribute](
-        window_bounds=ir.DenseI64ArrayAttr.get(block_shape),
-        transform_indices=ir.FlatSymbolRefAttr.get(func_name),
-    )
-    window_params.append(ir.DictAttr.get(block_params))
-  func_op.attributes["window_params"] = ir.ArrayAttr.get(window_params)
-
-
-@dataclasses.dataclass(init=False)
-class MosaicGridMapping(tc_lowering.MosaicGridMapping):
-  """Abstracts a grid mapping for Mosaic SparseCore."""
-
-  def __init__(
-      self,
-      jaxpr: jax_core.Jaxpr,
-      grid_mapping: pallas_core.GridMapping,
-      dimension_semantics: Sequence[tpu_core.DimensionSemantics] | None,
-      mesh: mesh_lib.Mesh | None,
-      kernel_type: tpu_core.CoreType,
-  ):
-    if any(
-        isinstance(var.aval, sc_core.AbstractRef)
-        for var in jaxpr.invars[grid_mapping.slice_scratch_ops]
-    ):
-      # TODO(slebedev): Support tiling annotations for kernel operands.
-      raise NotImplementedError(
-          "`plsc.MemoryRef`s are not supported as scratch operands to the"
-          " kernel. Allocate them in the kernel body via `pl.run_scoped`."
-      )
-    super().__init__(
-        jaxpr,
-        grid_mapping,
-        dimension_semantics,
-        mesh,
-        dynamic_shape_replacement_fn=dynamic_shape_replacement_fn,
-        kernel_type=kernel_type,
-    )
-
-
-def lower_jaxpr_to_func(
-    jaxpr: jax_core.Jaxpr,
-    *,
-    name: str,
-    kernel_type: tpu_core.CoreType,
-    mosaic_grid_mapping: MosaicGridMapping,
-    forward_compatible: bool,
-    backend: Any | None,
-    mpmd_meshes: Mapping[tpu_core.CoreType, pallas_core.Mesh] | None = None,
-) -> func.FuncOp:
-  """Lowers a Jaxpr to a Mosaic SparseCore function."""
-  assert mpmd_meshes is not None, "mpmd_meshes must be provided."
-  num_grid = len(mosaic_grid_mapping.grid_types)
-  num_scalar_prefetch = len(mosaic_grid_mapping.scalar_prefetch_types)
-  if num_scalar_prefetch:
-    raise NotImplementedError("Scalar prefetch not supported.")
-  num_scratch = len(mosaic_grid_mapping.scratch_types)
-  arg_types = [
-      *mosaic_grid_mapping.grid_types,
-      *mosaic_grid_mapping.scalar_prefetch_types,
-      *mosaic_grid_mapping.operand_types,
-      *mosaic_grid_mapping.scratch_types,
-  ]
-  arg_block_shapes = [
-      *mosaic_grid_mapping.scalar_prefetch_block_shapes,
-      *mosaic_grid_mapping.operand_block_shapes,
-      *mosaic_grid_mapping.scratch_block_shapes,
-  ]
-
-  def body_func(*args: ir.Value):
-    grid_indices, scalar_prefetch, operands_and_scratch = util.split_list(
-        args, [num_grid, num_scalar_prefetch]
-    )
-    grid_indices = mosaic_grid_mapping.get_grid_indices(
-        grid_indices, maybe_include_mapped_dims=False
-    )
-    jaxpr_indices = tuple(
-        idx
-        for i, idx in enumerate(grid_indices)
-        if i not in mosaic_grid_mapping.vmapped_dims
-    )
-    lowering_context = LoweringContext(
-        mosaic_grid_mapping.grid,  # pyrefly: ignore[bad-argument-type]
-        mosaic_grid_mapping.grid_names,
-        mosaic_grid_mapping.vmapped_dims,
-        jaxpr_indices,
-        arg_block_shapes,
-        source_info_util.NameStack(),
-        jax_mesh_context=mosaic_grid_mapping.mesh_info,
-        traceback_caches=mlir.TracebackCaches(),
-        kernel_type=kernel_type,
-        forward_compatible=forward_compatible,
-        backend=backend,
-        dynamic_shape_replacement_fn=dynamic_shape_replacement_fn,
-        mpmd_meshes=mpmd_meshes,
-    )
-    return tc_lowering.jaxpr_subcomp(
-          lowering_context, jaxpr, *scalar_prefetch, *operands_and_scratch
-    )
-
-  body: Any = func.FuncOp.from_py_func(*arg_types, name=name)(body_func)
-  func_op = cast(func.FuncOp, body.func_op)
-  func_op.attributes["tpu.core_type"] = ir.Attribute.parse(
-      f"#tpu.core_type<{kernel_type}>"
-  )
-  func_op.attributes["scratch_operands"] = ir.IntegerAttr.get(
-      ir.IntegerType.get_signless(64), num_scratch
-  )
-  arg_attrs = [ir.DictAttr.get({})] * num_grid
-  for arg, bm in zip(
-      func_op.arguments[num_grid : len(func_op.arguments) - num_scratch],
-      mosaic_grid_mapping.block_mappings,
-  ):
-    d: dict[str, ir.Attribute] = {}
-    if (
-        str(arg.type.memory_space) == "#tpu.memory_space<hbm>"
-        or str(arg.type.memory_space) == "#tpu.memory_space<semaphore_mem>"
-    ):
-      d["sc.persistent"] = ir.UnitAttr.get()
-    if isinstance(bm, sc_core.BlockMapping) and bm.indexed_by is not None:
-      d["sc.indexed_by"] = mlir.i32_attr(bm.indexed_by)
-      d["sc.indexed_dim"] = mlir.i32_attr(bm.indexed_dim)
-    arg_attrs.append(ir.DictAttr.get(d))
-  arg_attrs.extend([ir.DictAttr.get({})] * num_scratch)
-
-  func_op.arg_attrs = ir.ArrayAttr.get(arg_attrs)
-  try:
-    func_op.verify()
-  except Exception as e:
-    raise ValueError(
-        f"Body failed to verify: {func_op}.\nThis is an internal error."
-        " Please report a bug at:"
-        " https://github.com/jax-ml/jax/issues/new?assignees=sharadmv."
-    ) from e
-  return func_op
+_dma_unflatten = tpu_primitives._dma_unflatten
+_get_ref_and_transforms = tpu_primitives._get_ref_and_transforms
 
 
 register_lowering_rule = functools.partial(
@@ -619,7 +117,6 @@ def _load_lowering_rule(
         "Integer indexing of refs that follows a non-trivial slice is not"
         " supported on SC"
     )
-  del sizes  # Currently unused.
   if not all(s == 1 for s in strides):
     raise NotImplementedError(
         "Get only supports slices with stride 1, got {strides}"
@@ -642,11 +139,28 @@ def _load_lowering_rule(
       raise NotImplementedError("Get does not support masked scalar loads")
     return memref.load(ref, starts)
 
-  _check_aval_is_supported("Get", out_aval)
-  vec_type = ir.VectorType.get(
+  if not ctx.lowering_context.needs_layout_passes:
+    _check_aval_is_supported("Get", out_aval)
+  out_vec_type = ir.VectorType.get(
       out_aval.shape, _dtype_to_ir_type(out_aval.dtype)
   )
-  return tpu.vector_load(vec_type, ref, indices=starts, strides=[], mask=mask)
+  if not ctx.lowering_context.needs_layout_passes:
+    return tpu.vector_load(
+        out_vec_type, ref, indices=starts, strides=[], mask=mask
+    )
+  # Load at the full memref rank, keeping integer-indexed dims as size 1,
+  # because apply-vector-layout requires the vector rank to match the memref.
+  memref_vec_shape = cast(
+      Sequence[int],
+      [1 if squeeze else s for s, squeeze in zip(sizes, squeeze_dims)],
+  )
+  memref_vec_type = ir.VectorType.get(
+      memref_vec_shape, _dtype_to_ir_type(out_aval.dtype)
+  )
+  load_val = tpu.vector_load(
+      memref_vec_type, ref, indices=starts, strides=[], mask=mask
+  )
+  return vector.shape_cast(out_vec_type, load_val)
 
 
 @register_lowering_rule(state_primitives.swap_p)
@@ -726,12 +240,31 @@ def _store_lowering_rule(
     memref.store(val, ref, starts)
     return old_val
 
-  _check_aval_is_supported("Swap", out_aval)
-  vec_type = ir.VectorType.get(
+  if not ctx.lowering_context.needs_layout_passes:
+    _check_aval_is_supported("Swap", out_aval)
+  out_vec_type = ir.VectorType.get(
       out_aval.shape, _dtype_to_ir_type(out_aval.dtype)
   )
-  old_val = tpu.vector_load(vec_type, ref, starts, strides=[], mask=mask)
-  tpu.vector_store(val, ref, starts, strides=[], mask=mask, add=add)
+  if not ctx.lowering_context.needs_layout_passes:
+    old_val = tpu.vector_load(out_vec_type, ref, starts, strides=[], mask=mask)
+    _ = tpu.vector_store(
+        val, ref, indices=starts, strides=[], mask=mask, add=add
+    )
+    return old_val
+  # Load and store at the full memref rank, keeping integer-indexed dims as
+  # size 1, because apply-vector-layout requires the vector rank to match
+  # the memref.
+  memref_vec_shape = cast(
+      Sequence[int],
+      [1 if squeeze else s for s, squeeze in zip(sizes, squeeze_dims)],
+  )
+  memref_vec_type = ir.VectorType.get(
+      memref_vec_shape, _dtype_to_ir_type(out_aval.dtype)
+  )
+  old_val = tpu.vector_load(memref_vec_type, ref, starts, strides=[], mask=mask)
+  old_val = vector.shape_cast(out_vec_type, old_val)
+  val_memref_rank = vector.shape_cast(memref_vec_type, val)
+  tpu.vector_store(val_memref_rank, ref, starts, strides=[], mask=mask, add=add)
   return old_val
 
 
@@ -801,36 +334,29 @@ def _debug_print_lowering_rule(
   return []
 
 
-def _memref_memory_space(ref: ir.Value) -> MemorySpace | CoreMemorySpace:
-  ir_memory_space = str(ir.MemRefType(ref.type).memory_space)
-  assert ir_memory_space.startswith("#tpu.memory_space<")
-  assert ir_memory_space.endswith(">")
-  ir_memory_space = ir_memory_space[len("#tpu.memory_space<") : -len(">")]
-  ir_memory_space, _, ir_core_type = ir_memory_space.partition(",")
-  ir_core_type = ir_core_type.strip()
-  if not ir_core_type:
-    return MemorySpace(ir_memory_space)
-  else:
-    return CoreMemorySpace(
-        MemorySpace(ir_memory_space), tpu_core.CoreType(ir_core_type)
-    )
-
-
 def _prepare_dma_refs(
     src_ref,
-    src_transforms,
     dst_ref,
-    dst_transforms,
     src_aval,
     dst_aval,
+    core_type: tpu_core.CoreType,
     is_add: bool = False,
 ):
   """Prepares the DMA source and destination references."""
-  src_memory_space = _memref_memory_space(src_ref)
-  dst_memory_space = _memref_memory_space(dst_ref)
+  src_ref_orig, dst_ref_orig = src_ref, dst_ref
+  src_memory_space = tpu_core.memory_space_to_tpu_memory_space(
+      src_aval.memory_space, core_type
+  )
+  dst_memory_space = tpu_core.memory_space_to_tpu_memory_space(
+      dst_aval.memory_space, core_type
+  )
+  src_ref, src_transforms = _get_ref_and_transforms(src_ref)
+  dst_ref, dst_transforms = _get_ref_and_transforms(dst_ref)
+  src_aval, src_transforms_aval = _get_ref_and_transforms(src_aval)
+  dst_aval, dst_transforms_aval = _get_ref_and_transforms(dst_aval)
   match src_memory_space, dst_memory_space:
     case MemorySpace.HBM | MemorySpace.VMEM_SHARED, MemorySpace.VMEM:
-      if _has_indirect_offsets(dst_transforms):
+      if _has_indirect_offsets(dst_transforms, dst_transforms_aval, core_type):
         raise ValueError(
             "Only the source ref can be indexed when doing a gather via"
             " `pltpu.async_copy`"
@@ -838,16 +364,16 @@ def _prepare_dma_refs(
       dst_ref, _ = _transform_ref(
           dst_ref, dst_aval, dst_aval.shape, dst_transforms
       )
-      dst_ref_shape = ir.MemRefType(dst_ref.type).shape
+      dst_ref_shape = tuple(ir.MemRefType(dst_ref.type).shape)
       indirect_offsets, src_transforms = _extract_indirect_offsets(
-          src_transforms, tuple(dst_ref_shape)
+          src_transforms, dst_ref_shape, src_transforms_aval, core_type
       )
       src_ref, _ = _transform_ref(
           src_ref, src_aval, src_aval.shape, src_transforms
       )
       indirect_offsets_ref_str = "src_ref"
     case MemorySpace.VMEM, MemorySpace.HBM | MemorySpace.VMEM_SHARED:
-      if _has_indirect_offsets(src_transforms):
+      if _has_indirect_offsets(src_transforms, src_transforms_aval, core_type):
         raise ValueError(
             "Only the destination ref can be indexed when doing a scatter via"
             " `pltpu.async_copy`"
@@ -855,9 +381,9 @@ def _prepare_dma_refs(
       src_ref, _ = _transform_ref(
           src_ref, src_aval, src_aval.shape, src_transforms
       )
-      src_ref_shape = ir.MemRefType(src_ref.type).shape
+      src_ref_shape = tuple(ir.MemRefType(src_ref.type).shape)
       indirect_offsets, dst_transforms = _extract_indirect_offsets(
-          dst_transforms, tuple(src_ref_shape)
+          dst_transforms, src_ref_shape, dst_transforms_aval, core_type
       )
       dst_ref, _ = _transform_ref(
           dst_ref, dst_aval, dst_aval.shape, dst_transforms
@@ -866,8 +392,8 @@ def _prepare_dma_refs(
     case _:  # Indirect DMA is not supported.
       if (
           # fmt: off
-          _has_indirect_offsets(src_transforms) or
-          _has_indirect_offsets(dst_transforms)
+          _has_indirect_offsets(src_transforms, src_transforms_aval, core_type) or
+          _has_indirect_offsets(dst_transforms, dst_transforms_aval, core_type)
           # fmt: on
       ):
         raise NotImplementedError(
@@ -881,12 +407,6 @@ def _prepare_dma_refs(
             f"HBM/VMEM_SHARED."
             f"Got (src, dst)={(src_aval.memory_space, dst_aval.memory_space)}"
         )
-      src_ref, _ = _transform_ref(
-          src_ref, src_aval, src_aval.shape, src_transforms
-      )
-      dst_ref, _ = _transform_ref(
-          dst_ref, dst_aval, dst_aval.shape, dst_transforms
-      )
       indirect_offsets = None
       indirect_offsets_ref_str = ""
   if is_add and indirect_offsets is None:
@@ -897,6 +417,9 @@ def _prepare_dma_refs(
         " or `pltpu.async_copy(..., {ref}={ref}.at[indices_ref],"
         " ...)`.".format(ref=indirect_offsets_ref_str)
     )
+  if indirect_offsets is None:
+    # If typical DMA path, don't alter the refs.
+    return src_ref_orig, dst_ref_orig, None
   return src_ref, dst_ref, indirect_offsets
 
 
@@ -911,23 +434,20 @@ def _dma_start_lowering_rule(
     priority: int,
     add: bool,
 ):
-  (
-      src_ref,
-      src_transforms,
-      dst_ref,
-      dst_transforms,
-      sem,
-      sem_transforms,
-      src_sem,
-      src_sem_transforms,
-      device_id,
-  ) = tpu_primitives._dma_unflatten(tree, args)
-  src_aval, _, dst_aval, _, sem_aval, _, src_sem_aval, _, device_id_aval = (
-      tpu_primitives._dma_unflatten(tree, ctx.avals_in)
+  src_ref, dst_ref, sem, src_sem, device_id = _dma_unflatten(
+      tree, args
+  )
+  src_aval, dst_aval, sem_aval, src_sem_aval, device_id_aval = _dma_unflatten(
+      tree, ctx.avals_in
   )
 
   src_ref, dst_ref, indirect_offsets = _prepare_dma_refs(
-      src_ref, src_transforms, dst_ref, dst_transforms, src_aval, dst_aval, add
+      src_ref,
+      dst_ref,
+      src_aval,
+      dst_aval,
+      ctx.lowering_context.kernel_type,
+      add,
   )
   if add and indirect_offsets is None:
     # TODO: Support regular DMA with add=True.
@@ -937,35 +457,58 @@ def _dma_start_lowering_rule(
         "`pltpu.async_copy(..., dst_ref=ref.at[jnp.arange(vec_dim)], ...)` or "
         "`pltpu.async_copy(..., dst_ref=ref.at[iota_ref], ...)`."
     )
-  sem, _ = _transform_ref(sem, sem_aval, sem_aval.shape, sem_transforms)
-  if src_sem is not None:
-    src_sem, _ = _transform_ref(
-        src_sem, src_sem_aval, src_sem_aval.shape, src_sem_transforms
+  core_index = None
+  if device_id is not None:
+    if isinstance(sem_aval.memory_space, pallas_core.CoreMemorySpace):
+      dest_mesh = sem_aval.memory_space.mesh
+    else:
+      dest_mesh = None
+    device_id, core_index = tc_lowering._device_id_to_logical(
+        ctx, device_id, device_id_type, device_id_aval, dest_mesh
     )
 
   # If not ``None``, we lower to an indirect DMA instead.
   if indirect_offsets is None:
-    if device_id is not None:
-      device_id, _ = tc_lowering._device_id_to_logical(
-          ctx, device_id, device_id_type, device_id_aval
+    def _dma_start(src_ref, dst_ref, sem, src_sem):
+      tpu.enqueue_dma(
+          source=src_ref,
+          target=dst_ref,
+          target_semaphore=sem,
+          source_semaphore=src_sem,
+          device_id=device_id,
+          priority=priority,
+        core_id=core_index,
       )
-    tpu.enqueue_dma(
-        src_ref,
-        dst_ref,
-        sem,
-        source_semaphore=src_sem,
-        device_id=device_id,
-        priority=priority,
+      return []
+
+    return tc_lowering.lower_with_transformed_refs(
+        _dma_start,
+        [src_ref, dst_ref, sem, src_sem],
+        [src_aval, dst_aval, sem_aval, src_sem_aval],
     )
-    return []
 
   if device_id is not None:
     raise NotImplementedError(
         "Scatter/gather to or from a remote device via `pltpu.async_copy` is"
         " not supported"
     )
-  del priority  # Unused by indirect DMAs.
-  tpu.enqueue_indirect_dma(src_ref, dst_ref, indirect_offsets, sem, add=add)
+
+  offset_filter = None
+  if indirect_offsets.ignored_value is not None:
+    offset_filter = tc_lowering._ensure_mlir_value(
+        indirect_offsets.ignored_value, jax_core.ShapedArray((), jnp.int32)
+    )
+
+  sem_aval, _ = _get_ref_and_transforms(sem_aval)
+  sem, _ = _transform_ref(sem, sem_aval, sem_aval.shape)
+  tpu.enqueue_indirect_dma(
+      src_ref,
+      dst_ref,
+      indirect_offsets.values,
+      sem,
+      add=add,
+      offset_filter=offset_filter,
+  )
   return []
 
 
@@ -977,139 +520,193 @@ def _dma_wait_lowering_rule(
     *args,
     tree,
     device_id_type: pallas_primitives.DeviceIdType,
+    insert_dummy_device: bool,
 ):
-  (
-      src_ref,
-      src_transforms,
-      dst_ref,
-      dst_transforms,
-      sem,
-      sem_transforms,
-      _,
-      _,
-      device_id,
-  ) = tpu_primitives._dma_unflatten(tree, args)
-  src_aval, _, dst_aval, _, sem_aval, _, _, _, device_id_aval = (
-      tpu_primitives._dma_unflatten(tree, ctx.avals_in)
+  src_ref, dst_ref, sem, _, device_id = _dma_unflatten(
+      tree, args
+  )
+  src_aval, dst_aval, sem_aval, _, device_id_aval = _dma_unflatten(
+      tree, ctx.avals_in
   )
 
   src_ref, dst_ref, indirect_offsets = _prepare_dma_refs(
-      src_ref, src_transforms, dst_ref, dst_transforms, src_aval, dst_aval,
+      src_ref,
+      dst_ref,
+      src_aval,
+      dst_aval,
+      ctx.lowering_context.kernel_type,
   )
-  sem, _ = _transform_ref(sem, sem_aval, sem_aval.shape, sem_transforms)
+  core_id = None
+  if insert_dummy_device:
+    i32 = ir.IntegerType.get_signless(32)
+    core_id = device_id = arith.constant(i32, ir.IntegerAttr.get(i32, 0))
+  elif device_id is not None:
+    if isinstance(sem_aval.memory_space, pallas_core.CoreMemorySpace):
+      dest_mesh = sem_aval.memory_space.mesh
+    else:
+      dest_mesh = None
+    device_id, core_id = tc_lowering._device_id_to_logical(
+        ctx, device_id, device_id_type, device_id_aval, dest_mesh
+    )
+    if core_id:
+      raise NotImplementedError(
+          "Core index must be None when waiting on a local DMA."
+      )
+
 
   # If not ``None``, we lower to an indirect DMA instead of a regular DMA.
   if indirect_offsets is None:
-    if device_id is not None:
-      device_id, _ = tc_lowering._device_id_to_logical(
-          ctx, device_id, device_id_type, device_id_aval
+    def _dma_wait(sem, src_ref, dst_ref):
+      tpu.wait_dma2(
+        sem, src_ref, dst_ref, device_id=device_id, core_id=core_id
       )
-    tpu.wait_dma2(sem, src_ref, dst_ref, device_id=device_id)
-    return []
+      return []
+    return tc_lowering.lower_with_transformed_refs(
+        _dma_wait,
+        [sem, src_ref, dst_ref],
+        [sem_aval, src_aval, dst_aval],
+    )
 
   if device_id is not None:
     raise NotImplementedError(
         "Scatter/gather to or from a remote device via `pltpu.async_copy` is"
         " not supported"
     )
+  sem_aval, _ = _get_ref_and_transforms(sem_aval)
+  sem, _ = _transform_ref(sem, sem_aval, sem_aval.shape)
   tpu.wait_indirect_dma(sem, src_ref, dst_ref)
   return []
 
 
-def _extract_indirect_offsets_from_indexer(
-    indexer: indexing.NDIndexer, expected_shape: tuple[int, ...] | None = None
-) -> ir.Value | None:
-  match indexer.indices:
-    case [ir.Value() as offsets, *_] if (
+def _extract_indirect_offsets_from_indices(
+    indices: Sequence[Any],
+    indices_aval: Sequence[Any],
+    core_type: tpu_core.CoreType,
+    indexer_shape: tuple[int | Any, ...],
+    expected_shape: tuple[int, ...] | None = None,
+) -> sc_core.Indices | None:
+  """Extracts the indirect offsets from the indices, if there are any.
+
+  Note that it ignores any dimensions other than major. The indices might
+  need to be split further to deal with slicing of minor dimensions.
+  """
+  match indices_aval:
+    case [sc_core.Indices(offsets_aval), *_]:
+      offsets = indices[0]
+      assert isinstance(offsets, sc_core.Indices)
+      extracted = _extract_indirect_offsets_from_indices(
+          [offsets.values, *indices[1:]],
+          [offsets_aval, *indices_aval[1:]],
+          core_type,
+          indexer_shape,
+          expected_shape,
+      )
+      if extracted is None:
+        return None
+      return sc_core.Indices(
+          extracted.values, ignored_value=offsets.ignored_value
+      )
+
+    case [jax_core.AbstractValue() as offsets_aval, *_] if (
         # fmt: off
-        isinstance(offsets.type, ir.MemRefType) or
-        isinstance(offsets.type, ir.VectorType)
+        isinstance(offsets_aval, state.AbstractRef) or
+        (isinstance(offsets_aval, jax_core.ShapedArray) and offsets_aval.shape)
     ):  # fmt: on
-      shape = (*offsets.type.shape, *indexer.shape[offsets.type.rank :])
+      if len(offsets_aval.shape) != 1:
+        raise NotImplementedError(
+            "Only 1D indices are supported by scatter/gather via"
+            " `pltpu.async_copy` on SparseCore, got rank"
+            f" {len(offsets_aval.shape)}"
+        )
+      shape = (*offsets_aval.shape, *indexer_shape[len(offsets_aval.shape) :])
       if expected_shape is not None and shape != expected_shape:
         raise NotImplementedError(
             "The indexer shape in scatter/gather via `pltpu.async_copy` does"
             f" not match the expected shape. Want: {expected_shape}, got:"
             f" {shape}."
         )
-    case [state.TransformedRef() as offsets_ref, *_]:
-      offsets_type = ir.MemRefType(offsets_ref.ref.type)
-      if offsets_type.element_type != ir.IntegerType.get_signless(32):
+      offsets = indices[0]
+      assert isinstance(offsets, ir.Value)
+    case [state.TransformedRef() as offsets_aval, *_]:
+      if offsets_aval.dtype != jnp.dtype("int32"):
         raise NotImplementedError(
             "Only int32 indices are supported by scatter/gather via"
             " `pltpu.async_copy` with a dynamically-shaped indexer"
         )
-      offsets_ref_aval = state.AbstractRef(
-          inner_aval=jax_core.ShapedArray(
-              dtype=jnp.dtype("int32"),
-              shape=tuple(offsets_type.shape),
-          ),
-          memory_space=None,
-      )
+      offsets_ref = indices[0]
+      assert isinstance(offsets_ref, state.TransformedRef)
       offsets, _ = _transform_ref(
           offsets_ref.ref,
-          offsets_ref_aval,
-          offsets_type.shape,  # The shape before the indexing.
+          offsets_aval.ref,
+          offsets_aval.ref.shape,  # The shape before the indexing.
           offsets_ref.transforms,
       )
+      assert isinstance(offsets, ir.Value)
     case _:
       return None
 
-  if isinstance(offsets.type, ir.MemRefType):
-    offsets_memory_space = _memref_memory_space(offsets)
+  if isinstance(offsets_aval, (state.AbstractRef, state.TransformedRef)):
+    offsets_memory_space = tpu_core.memory_space_to_tpu_memory_space(
+        offsets_aval.memory_space, core_type=core_type
+    )
+    if isinstance(offsets_memory_space, CoreMemorySpace):
+      offsets_memory_space = offsets_memory_space.memory_space
     if offsets_memory_space is not MemorySpace.VMEM:
       raise NotImplementedError(
           "Indices for scatter/gather via `pltpu.async_copy` must be in VMEM,"
           f" got {offsets_memory_space!r}"
       )
-  if not state_discharge._is_trivial_indexer(
-      indexing.NDIndexer(indexer.indices[1:], indexer.shape[1:], ())
-  ):
-    # TODO(slebedev): Consider lifting this restriction.
-    raise NotImplementedError(
-        "Only indexing along the major dimension is supported in scatter/gather"
-        " via `pltpu.async_copy`"
-    )
-  return offsets
+  return sc_core.Indices(offsets)
 
 
 def _extract_indirect_offsets(
-    transforms: Sequence[state.Transform], expected_shape: tuple[int, ...]
-) -> tuple[ir.Value | None, Sequence[state.Transform]]:
-  for i, indexer in enumerate(transforms):
+    transforms: Sequence[state.Transform],
+    expected_shape: tuple[int, ...],
+    transforms_aval: Sequence[state.Transform],
+    core_type: tpu_core.CoreType,
+) -> tuple[sc_core.Indices | None, Sequence[state.Transform]]:
+  for i, (indexer, indexer_aval) in enumerate(zip(transforms, transforms_aval)):
     if not isinstance(indexer, indexing.NDIndexer):
       continue
-    offsets = _extract_indirect_offsets_from_indexer(indexer, expected_shape)
+    assert isinstance(indexer_aval, indexing.NDIndexer)
+    offsets = _extract_indirect_offsets_from_indices(
+        indexer.indices,
+        indexer_aval.indices,
+        core_type,
+        indexer.get_indexer_shape(),
+        expected_shape,
+    )
     if offsets is None:
       continue
+    # The slices applied to other dimensions are processed independently of
+    # indirect offsets.
+    split_indices = (indexing.Slice(0, indexer.shape[0]), *indexer.indices[1:])
+    split_indexer = indexing.NDIndexer(split_indices, indexer.shape, ())
     if i != len(transforms) - 1:
       raise NotImplementedError(
           "The indexed ref in scatter/gather via `pltpu.async_copy` cannot have"
           " any transforms following the indexer"
       )
-    return offsets, transforms[:i]
+    return offsets, [*transforms[:i], split_indexer]
 
   return None, transforms
 
 
-def _has_indirect_offsets(transforms: Sequence[ir.Value]) -> bool:
+def _has_indirect_offsets(
+    transforms: Sequence[state.Transform],
+    transforms_aval: Sequence[state.Transform],
+    core_type: tpu_core.CoreType,
+) -> bool:
   return any(
-      _extract_indirect_offsets_from_indexer(indexer) is not None
-      for indexer in transforms
+      _extract_indirect_offsets_from_indices(
+          indexer.indices,
+          indexer_aval.indices,  # pyrefly: ignore[missing-attribute]
+          core_type,
+          indexer.get_indexer_shape(),
+      )
+      is not None
+      for indexer, indexer_aval in zip(transforms, transforms_aval)
       if isinstance(indexer, indexing.NDIndexer)
-  )
-
-
-@register_lowering_rule(pallas_primitives.run_scoped_p)
-def _run_scoped_lowering_rule(
-    ctx: LoweringRuleContext, *consts, jaxpr, collective_axes
-):
-  return tc_lowering._run_scoped_lowering_rule(
-      ctx,
-      *consts,
-      jaxpr=jaxpr,
-      collective_axes=collective_axes,
-      alloc_fn=_alloc_value,
   )
 
 
@@ -1178,7 +775,7 @@ def _jaxpr_call_lowering_rule(
 def _empty_ref_lowering_rule(ctx: LoweringRuleContext, ty, memory_space):
   del ty, memory_space
   [aval_out] = ctx.avals_out
-  return _alloc_value(aval_out, ctx=ctx)
+  return tc_lowering._alloc_value(aval_out, ctx=ctx)
 
 
 @register_lowering_rule(
@@ -1223,56 +820,6 @@ def _sort_lowering_rule(
 
 
 @register_lowering_rule(
-    lax.gather_p, kernel_types=[tpu_core.CoreType.SC_VECTOR_SUBCORE]
-)
-def _gather_lowering_rule(
-    ctx: LoweringRuleContext,
-    x,
-    indices,
-    *,
-    dimension_numbers,
-    slice_sizes,
-    unique_indices,
-    indices_are_sorted,
-    mode,
-    fill_value,
-):
-
-  in_aval, indices_aval = ctx.avals_in
-  out_aval, = ctx.avals_out
-
-  if len(in_aval.shape) != 1:
-    raise NotImplementedError("Only 1D gather is supported")
-  if in_aval.shape != indices_aval.shape[:-1] != out_aval.shape:
-    raise ValueError(
-        "Shape mismatch in input, indices and output:"
-        f" {in_aval.shape}, {indices_aval.shape[:-1]}, {out_aval.shape}"
-    )
-
-  # During lowering jnp.take_along_axis to lax.gather, we append extra dimension
-  # to the end of the indices array. We should reshape it back to the original
-  # shape before lowering to Mosaic and rely on MLIR canonicalization to remove
-  # the reshapes.
-  assert indices_aval.shape == in_aval.shape + (1,)
-  recovered_indices = vector.shape_cast(
-      ir.VectorType.get(in_aval.shape, indices.type.element_type),
-      indices,
-  )
-  # Note: current support for lax.gather is still very limited.
-  del fill_value
-  if slice_sizes == (1,) and mode == lax.GatherScatterMode.PROMISE_IN_BOUNDS:
-    if dimension_numbers == lax.GatherDimensionNumbers(
-        offset_dims=(),
-        collapsed_slice_dims=(0,),
-        start_index_map=(0,),
-        operand_batching_dims=(),
-        start_indices_batching_dims=(),
-    ):
-      return tpu.dynamic_gather(x, recovered_indices, [0])
-  raise NotImplementedError("Unsupported gather")
-
-
-@register_lowering_rule(
     lax.rev_p, kernel_types=[tpu_core.CoreType.SC_VECTOR_SUBCORE]
 )
 def _rev_lowering_rule(ctx: LoweringRuleContext, x, dimensions):
@@ -1288,44 +835,3 @@ def _rev_lowering_rule(ctx: LoweringRuleContext, x, dimensions):
       arith.subi(cdim_vec, tpu.iota(cdim_vec.type, dimensions=[0])),
       dimensions=[0],
   )
-
-
-def _default_tile_strides(
-    tiling: sc_core.Tiling, shape: Sequence[int]
-) -> Sequence[int]:
-  """Returns default tile strides for a given shape and tiling."""
-  assert tiling
-
-  cdiv = lambda a, b: (a + b - 1) // b
-
-  strides = [0] * len(shape)
-  stride = 1
-  first_tile, *_ = tiling
-  for d in reversed(range(len(shape))):
-    assert shape[d] != ir.ShapedType.get_dynamic_size()
-    strides[d] = stride
-    if d >= len(shape) - len(first_tile):
-      tile_d = d - (len(shape) - len(first_tile))
-      stride *= cdiv(shape[d], first_tile[tile_d])
-    else:
-      stride *= shape[d]
-  return strides
-
-
-def _alloc_value(
-    aval: jax_core.AbstractValue | tc_lowering.ShapedAbstractValue, *, ctx: LoweringRuleContext
-) -> ir.Value:
-  if isinstance(aval, sc_core.AbstractRef) and aval.tiling is not None:
-    tiling = "".join(f"({','.join(map(str, tile))})" for tile in aval.tiling)
-    strides = _default_tile_strides(aval.tiling, aval.shape)
-    out_type = ir.MemRefType.get(
-        aval.shape,
-        _dtype_to_ir_type(aval.dtype, is_kernel_boundary=True),
-        layout=ir.Attribute.parse(f"#tpu.tiled<{tiling},{strides}>"),
-        memory_space=tc_lowering._memory_space_to_mosaic_attribute(
-            aval.memory_space,
-            kernel_type=ctx.lowering_context.kernel_type,
-        ),
-    )
-    return memref.alloca(out_type, [], [])
-  return tc_lowering._alloc_value(aval, ctx=ctx)

@@ -39,6 +39,7 @@ from jax._src.lib import xla_client as xc
 from jax._src.lib.mlir import ir
 from jax._src.lib.mlir.dialects import hlo
 from jax._src.sharding_impls import SdyArray, SdyArrayList, SdyDim, SingleDeviceSharding
+from jax._src.sharding import Sharding
 from jax._src.typing import Array
 import numpy as np
 
@@ -74,7 +75,7 @@ def pure_callback_impl(
     *args,
     result_avals,
     callback: _FlatCallback,
-    sharding: SingleDeviceSharding | None,
+    sharding: Sharding | None,
     vmap_method: str | None,
 ):
   del sharding, vmap_method, result_avals
@@ -104,7 +105,7 @@ def pure_callback_abstract_eval(
     *avals,
     callback: _FlatCallback,
     result_avals,
-    sharding: SingleDeviceSharding | None,
+    sharding: Sharding | None,
     vmap_method: str | None,
 ):
   del avals, callback, sharding, vmap_method
@@ -139,15 +140,16 @@ def _get_sdy_array_list_for_callbacks(avals: Sequence[core.ShapedArray]) -> SdyA
   ndims = [0]
   if avals:
     ndims = [x.ndim for x in avals if isinstance(x, core.ShapedArray)]
-  return SdyArrayList([
+  return SdyArrayList(tuple(
       SdyArray(
           mesh_shape=(),
-          dim_shardings=[SdyDim(axes=[], is_open=False)] * ndim,
-          logical_device_ids=()) for ndim in ndims])
+          dim_shardings=(SdyDim(axes=(), is_open=False),) * ndim,
+          logical_device_ids=())
+      for ndim in ndims))
 
 
 def _callback_op_sharding(
-    axis_context, sharding: SingleDeviceSharding | None, avals_out
+    axis_context, sharding: Sharding | None, avals_out
 ):
   if isinstance(axis_context, sharding_impls.SPMDAxisContext):
     # If we have fully manual sharding during lowering, that means the JAX
@@ -202,11 +204,9 @@ def _callback_op_sharding(
       # number of result ops. If there are no result ops, we need 1 shardy
       # annotation.
       num_sdy_shardings = max(1, len(avals_out))
-      op_sharding = SdyArrayList(num_sdy_shardings * [
-          SdyArray(
-              mesh_shape=(),
-              dim_shardings=[],
-              logical_device_ids=(device_index,))])
+      op_sharding = SdyArrayList((
+          SdyArray(mesh_shape=(), dim_shardings=(),
+                   logical_device_ids=(device_index,)),) * num_sdy_shardings)
     else:
       op_sharding = xc.OpSharding()
       op_sharding.type = xc.OpSharding.Type.MAXIMAL
@@ -219,7 +219,7 @@ def _callback_op_sharding(
 
 
 def pure_callback_lowering(
-    ctx, *args, callback: _FlatCallback, sharding: SingleDeviceSharding | None, **params
+    ctx, *args, callback: _FlatCallback, sharding: Sharding | None, **params
 ):
   def _callback(*flat_args):
     return tuple(
@@ -262,7 +262,7 @@ def pure_callback(
     callback: Callable[..., Any],
     result_shape_dtypes: Any,
     *args: Any,
-    sharding: SingleDeviceSharding | None = None,
+    sharding: Sharding | None = None,
     vmap_method: str | None = None,
     **kwargs: Any,
 ):
@@ -419,7 +419,7 @@ def io_callback_impl(
     *args,
     result_avals,
     callback: _FlatCallback,
-    sharding: SingleDeviceSharding | None,
+    sharding: Sharding | None,
     ordered: bool,
 ):
   del result_avals, sharding, ordered
@@ -449,7 +449,7 @@ def io_callback_abstract_eval(
     *avals,
     callback: _FlatCallback,
     result_avals,
-    sharding: SingleDeviceSharding | None,
+    sharding: Sharding | None,
     ordered: bool,
 ):
   del avals, sharding, callback
@@ -472,7 +472,7 @@ ad.primitive_transposes[io_callback_p] = io_callback_transpose_rule
 def io_callback_batching_rule(
     args, dims, callback, result_avals, sharding, ordered
 ):
-  from jax._src.lax.control_flow.loops import map as lax_map  # pytype: disable=import-error
+  from jax._src.lax.control_flow.loops import map as lax_map  # pyrefly: ignore[missing-import]
   if ordered:
     raise ValueError("Cannot `vmap` ordered IO callback.")
   is_batched = [d is not batching.not_mapped for d in dims]
@@ -538,7 +538,7 @@ def io_callback(
     callback: Callable[..., Any],
     result_shape_dtypes: Any,
     *args: Any,
-    sharding: SingleDeviceSharding | None = None,
+    sharding: Sharding | None = None,
     ordered: bool = False,
     **kwargs: Any,
 ):
@@ -593,6 +593,7 @@ _XLA_HOST_TRANSFER_PJRT_RENDEZVOUS_HANDLER_NAME = "pjrt_rendezvous"
 
 
 def send_to_host(
+    ctx: mlir.ModuleContext,
     channel: int,
     token: ir.Value[hlo.TokenType],
     operand: Any,
@@ -620,15 +621,15 @@ def send_to_host(
       # shardings should be the same.
       assert isinstance(sharding, SdyArrayList)
       assert len(sharding.shardings) >= 1
-      sharding = SdyArrayList([
-          SdyArray(
-              mesh_shape=(), dim_shardings=[],
-              logical_device_ids=sharding.shardings[0].logical_device_ids)])
-    mlir.set_sharding(send_op, sharding)
+      sharding = SdyArrayList((SdyArray(
+          mesh_shape=(), dim_shardings=(),
+          logical_device_ids=sharding.shardings[0].logical_device_ids),))
+    mlir.set_sharding(ctx, send_op, sharding)
   return send_op.result
 
 
 def receive_from_host(
+    ctx: mlir.ModuleContext,
     channel: int,
     token: ir.Value[hlo.TokenType],
     out_aval: core.ShapedArray,
@@ -637,7 +638,7 @@ def receive_from_host(
     sharding: SdyArrayList | xc.OpSharding | None = None,
 ) -> tuple[ir.Value, ir.Value]:
   channel_handle = hlo.ChannelHandle.get(channel, mlir.RECV_FROM_HOST_TYPE)
-  out_type = mlir.aval_to_ir_type(out_aval)
+  out_type = mlir.aval_to_ir_type(ctx, out_aval)
   recv_op = hlo.RecvOp([out_type,
                         hlo.TokenType.get()], token, channel_handle,
                         is_host_transfer=ir.BoolAttr.get(True))
@@ -659,12 +660,11 @@ def receive_from_host(
       # Note that even if a function returns N results, we will end up with N
       # `RecvOp`s, so we only need to get the first sharding. All shardings are
       # the same anyways, operating on the same single device ID.
-      sharding = SdyArrayList([
+      sharding = SdyArrayList((
           sharding.shardings[0],
-          SdyArray(
-              mesh_shape=(), dim_shardings=[],
-              logical_device_ids=sharding.shardings[0].logical_device_ids)])
-    mlir.set_sharding(recv_op, sharding)
+          SdyArray(mesh_shape=(), dim_shardings=(),
+                   logical_device_ids=sharding.shardings[0].logical_device_ids)))
+    mlir.set_sharding(ctx, recv_op, sharding)
   # Token should be at the end of the results
   result, token = recv_op.results
   return token, result
@@ -719,13 +719,13 @@ def _emit_tpu_python_callback(
     dummy_send_aval = core.ShapedArray((1,), np.float32)
     dummy_send_val = mlir.ir_constant(np.zeros(1, np.float32))
     operand_shapes = [*operand_shapes, _aval_to_xla_shape(dummy_send_aval)]
-    token = send_to_host(send_channel, token, dummy_send_val,
+    token = send_to_host(ctx.module_context, send_channel, token, dummy_send_val,
                          sharding=sharding)
     send_channels.append(send_channel)
   else:
     for operand in operands:
       channel = ctx.module_context.new_channel()
-      token = send_to_host(channel, token, operand, sharding=sharding)
+      token = send_to_host(ctx.module_context, channel, token, operand, sharding=sharding)
       send_channels.append(channel)
 
   recv_channels = []
@@ -742,7 +742,7 @@ def _emit_tpu_python_callback(
     result_shapes = [_aval_to_xla_shape(dummy_recv_aval)]
     channel = ctx.module_context.new_channel()
     token, _ = receive_from_host(
-        channel, token, dummy_recv_aval, sharding=sharding
+        ctx.module_context, channel, token, dummy_recv_aval, sharding=sharding
     )
     recv_channels.append(channel)
   else:
@@ -750,7 +750,7 @@ def _emit_tpu_python_callback(
       channel = ctx.module_context.new_channel()
       assert isinstance(result_aval, core.ShapedArray)
       token, out = receive_from_host(
-          channel, token, result_aval, sharding=sharding
+          ctx.module_context, channel, token, result_aval, sharding=sharding
       )
       outputs.append(out)
       recv_channels.append(channel)
@@ -876,12 +876,9 @@ def emit_python_callback(
       # Add a sharding annotation for the token if we have at least one
       # output. Otherwise, the single shardy annotation required of all ops
       # (even those without any results) can annotate the token.
-      sharding = SdyArrayList([
-          SdyArray(
-              mesh_shape=(),
-              dim_shardings=[],
-              logical_device_ids=()),
-          *sharding.shardings])
+      sharding = SdyArrayList((
+          SdyArray(mesh_shape=(), dim_shardings=(), logical_device_ids=()),
+          *sharding.shardings))
     ctx = dataclasses.replace(
         ctx,
         avals_in=[core.abstract_token, *ctx.avals_in],
@@ -899,7 +896,7 @@ def emit_python_callback(
   )(ctx, *operands, index=np.uint64(index))
 
   if sharding is not None:
-    mlir.set_sharding(result, sharding)
+    mlir.set_sharding(ctx.module_context, result, sharding)
 
   results = result.results
 

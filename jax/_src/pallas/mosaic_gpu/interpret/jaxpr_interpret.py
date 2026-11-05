@@ -142,7 +142,7 @@ _SENTINEL = jnp.inf
 class JaxprInterpreter:
   """Interprets a jaxpr by replacing memory operations with (GPU) callbacks."""
 
-  grid_point_coords: tuple[int, ...]
+  grid_point_coords: jax.Array
   cluster_dims: tuple[int, ...]
 
   # The (flat) thread ID for the thread that this interpreter instance is
@@ -161,7 +161,7 @@ class JaxprInterpreter:
   #
   # where the `self.thread_id_in_block` is the minor-most coordinate, and
   # `self.cluster_coords` are in major-to-minor order.
-  thread_id: int
+  thread_id: jax.Array
 
   mesh: plgpu.Mesh | None
   device_info: DeviceInfo
@@ -173,11 +173,11 @@ class JaxprInterpreter:
     if self.mesh is None or self.mesh.num_threads is None:
       return 1
     else:
-      return int(self.mesh.num_threads)
+      return self.mesh.num_threads
 
   @functools.cached_property
-  def thread_id_in_block(self) -> int:
-    return self.thread_id % self.num_threads_per_block
+  def thread_id_in_block(self) -> jax.Array:
+    return lax.rem(self.thread_id, jnp.int32(self.num_threads_per_block))
 
   @functools.cached_property
   def cluster_coords(self) -> tuple[int, ...]:
@@ -212,9 +212,10 @@ class JaxprInterpreter:
     invals = get_invals()
     return gpu_callbacks.call_get(
         result_shape_and_dtype=eqn.outvars[0].aval,
-        device_id=self.device_info.device_id,
+        device_id=jnp.int32(self.device_info.device_id),
+        grid_point_coords=self.grid_point_coords,
         thread_id=self.thread_id,
-        allocation_key=invals[0],
+        allocation_key_as_array=invals[0],
         transforms=jax.tree.unflatten(eqn.params["tree"], invals[1:]),
         source_info=eqn.source_info,
     )
@@ -225,9 +226,10 @@ class JaxprInterpreter:
     invals = get_invals()
     return gpu_callbacks.call_swap(
         result_shape_and_dtype=eqn.outvars[0].aval,
-        device_id=self.device_info.device_id,
+        device_id=jnp.int32(self.device_info.device_id),
+        grid_point_coords=self.grid_point_coords,
         thread_id=self.thread_id,
-        allocation_key=invals[0],
+        allocation_key_as_array=invals[0],
         transforms=jax.tree.unflatten(eqn.params["tree"], invals[2:]),
         val=invals[1],
         mask=None,
@@ -254,11 +256,12 @@ class JaxprInterpreter:
                 assert same_allocations_for_all_threads
                 assert len(shape) == 1
                 return gpu_callbacks.call_allocate_barriers(
-                    device_id=self.device_info.device_id,
+                    device_id=jnp.int32(self.device_info.device_id),
+                    grid_point_coords=self.grid_point_coords,
                     thread_id=self.thread_id,
-                    num_arrivals=dtype.num_arrivals,
+                    num_arrivals=jnp.int32(dtype.num_arrivals),
                     num_barriers=shape[0],
-                    ref_count=self.num_threads_per_block,
+                    ref_count=jnp.int32(self.num_threads_per_block),
                     source_info=eqn.source_info,
                 )
               else:
@@ -266,11 +269,11 @@ class JaxprInterpreter:
                     memory_space
                 )
                 allocation_request = (
-                    gpu_callbacks.make_allocation_request_array(
-                        device_id=self.device_info.device_id,
+                    gpu_callbacks.call_make_allocation_request_array(
+                        device_id=jnp.int32(self.device_info.device_id),
                         memory_space_id=memory_space_idx,
                         thread_id=(
-                            0
+                            jnp.int32(0)
                             if same_allocations_for_all_threads
                             else self.thread_id
                         ),
@@ -282,11 +285,13 @@ class JaxprInterpreter:
                     )
                 )
               return gpu_callbacks.call_allocate_buffer(
-                  self.device_info.device_id,
-                  self.thread_id,
-                  allocation_request,
-                  interpret_utils.get_uninitialized_array(
-                      shape, dtype, self.interpret_params.uninitialized_memory),
+                  device_id=jnp.int32(self.device_info.device_id),
+                  grid_point_coords=self.grid_point_coords,
+                  thread_id=self.thread_id,
+                  allocation_request_as_array=allocation_request,
+                  value=interpret_utils.get_uninitialized_array(
+                      shape, dtype, self.interpret_params.uninitialized_memory
+                  ),
                   source_info=eqn.source_info,
               )
             case _:
@@ -299,17 +304,19 @@ class JaxprInterpreter:
             case jax_core.ShapedArray(shape=_, dtype=dtype):
               if isinstance(dtype, mosaic_gpu_core.BarrierType):
                 gpu_callbacks.call_deallocate_barrier(
-                    device_id=self.device_info.device_id,
+                    device_id=jnp.int32(self.device_info.device_id),
+                    grid_point_coords=self.grid_point_coords,
                     thread_id=self.thread_id,
-                    allocation_key=allocation,
+                    allocation_key_as_array=allocation,
                     source_info=eqn.source_info,
                 )
               else:
                 _raise_if_unsupported_memory_space(aval.memory_space)
                 gpu_callbacks.call_deallocate_buffer(
-                    self.device_info.device_id,
-                    self.thread_id,
-                    allocation,
+                    device_id=jnp.int32(self.device_info.device_id),
+                    grid_point_coords=self.grid_point_coords,
+                    thread_id=self.thread_id,
+                    allocation_key_as_array=allocation,
                     source_info=eqn.source_info,
                 )
 
@@ -400,7 +407,16 @@ class JaxprInterpreter:
       self,
       eqn,
       get_invals: Callable[[], Sequence[Any]],
-      barrier_callback: Callable[..., None],
+      barrier_callback: Callable[
+          [
+              jax.Array,
+              jax.Array,
+              jax.Array,
+              jnp.ndarray,
+              source_info_util.SourceInfo | None,
+          ],
+          None,
+      ],
   ):
     invals = get_invals()
     # `invals[0]` corresponds to the barrier this primitive operates on.
@@ -408,10 +424,11 @@ class JaxprInterpreter:
         invals[0], eqn.params["transforms_treedef"], invals[1:]
     )
     barrier_callback(
-        device_id=self.device_info.device_id,
-        thread_id=self.thread_id,
-        allocation_key=allocation_key_as_array,
-        source_info=eqn.source_info,
+        jnp.int32(self.device_info.device_id),
+        self.grid_point_coords,
+        self.thread_id,
+        allocation_key_as_array,
+        eqn.source_info,
     )
 
     assert eqn.primitive.multiple_results
@@ -463,11 +480,12 @@ class JaxprInterpreter:
     )
 
     gpu_callbacks.call_execute_device_local_memory_transfer(
-        device_id=self.device_info.device_id,
+        device_id=jnp.int32(self.device_info.device_id),
+        grid_point_coords=self.grid_point_coords,
         thread_id=self.thread_id,
-        src_allocation_key=invals[0],
+        src_allocation_key_as_array=invals[0],
         src_transforms=(),
-        dst_allocation_key=invals[1],
+        dst_allocation_key_as_array=invals[1],
         dst_transforms=(),
         barrier_allocation_key_as_array=barrier_allocation_key_as_array,
         source_info=eqn.source_info,

@@ -34,7 +34,6 @@ import jax
 from jax import lax
 from jax._src.export import _export
 from jax._src.lib import gpu_solver
-from jax._src.lib import jaxlib_extension_version
 
 from jax._src.internal_test_util import export_back_compat_test_util as bctu
 
@@ -725,11 +724,9 @@ class CompatTest(bctu.CompatTestBase):
       rocm_targets = {
           name for name, _, _ in gpu_solver.registrations().get("ROCM", ())
       }
-      if (jaxlib_extension_version < 426
-          or "hipsolver_gesdd_ffi" not in rocm_targets):
+      if "hipsolver_gesdd_ffi" not in rocm_targets:
         self.skipTest(
-            "hipsolver_gesdd_ffi requires jaxlib_extension_version >= 426 "
-            "and a plugin that registers hipsolver_gesdd_ffi")
+            "hipsolver_gesdd_ffi requires a plugin that registers hipsolver_gesdd_ffi")
 
     algorithm = dict(
         qr=lax.linalg.SvdAlgorithm.QR,
@@ -941,6 +938,8 @@ class CompatTest(bctu.CompatTestBase):
       data = self.load_testdata(rocm_threefry2x32.data_2026_02_05)
       self.run_one_test(func, data)
 
+  @jtu.ignore_warning(category=DeprecationWarning,
+                      message='`with mesh:` context manager')
   def test_tpu_sharding(self):
     # Tests "Sharding", "SPMDShardToFullShape", "SPMDFullToShardShape" on TPU
     if not jtu.test_device_matches(["tpu"]) or len(jax.devices()) < 2:
@@ -950,7 +949,7 @@ class CompatTest(bctu.CompatTestBase):
     devices = jax.devices()[:2]
     mesh = Mesh(devices, axis_names=("a"))
 
-    @partial(jax.jit,
+    @jax.jit(
             in_shardings=(NS(mesh, P("a", None)),),
             out_shardings=NS(mesh, P("a", None)))
     @partial(shard_map, mesh=mesh,
@@ -989,7 +988,7 @@ class CompatTest(bctu.CompatTestBase):
     dev_sharding = NS(mesh, P("a"))
     host_sharding = NS(mesh, P("a"), memory_kind="pinned_host")
 
-    @partial(jax.jit,
+    @jax.jit(
              in_shardings=(dev_sharding, host_sharding),
              out_shardings=dev_sharding)
     def func(x, y):
@@ -1175,6 +1174,8 @@ class CompatTest(bctu.CompatTestBase):
 
 class ShardyCompatTest(bctu.CompatTestBase):
 
+  @jtu.ignore_warning(category=DeprecationWarning,
+                      message='`with mesh:` context manager')
   def test_shardy_sharding_ops_with_different_meshes(self):
     # Tests whether we can save and load a module with meshes that have the
     # same axis sizes (and same order) but different axis names.

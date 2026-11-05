@@ -14,6 +14,7 @@
 
 from collections.abc import Mapping, Sequence
 import dataclasses
+import jax.numpy as jnp
 import math
 from typing import Any
 
@@ -88,8 +89,8 @@ def _allocate_buffers_for_inputs(
   input_buffer_keys = []
   for var, value in safe_zip(invars, inputs):
     assert var.aval.dtype == value.dtype
-    allocation_request = gpu_callbacks.make_allocation_request_array(
-        device_id=device_id,
+    allocation_request = gpu_callbacks.call_make_allocation_request_array(
+        device_id=jnp.int32(device_id),
         # All operands of a `pallas_call`/`core_map` that are arrays (i.e. that
         # are not sempahores, barriers etc.) are placed in `GMEM`. These arrays
         # (or slices thereof) may need to be copied into `SMEM` before executing
@@ -100,7 +101,7 @@ def _allocate_buffers_for_inputs(
     )
     input_buffer_keys.append(
         gpu_callbacks.call_allocate_buffer_for_all_threads(
-            device_id, allocation_request, value
+            jnp.int32(device_id), None, allocation_request, value
         )
     )
 
@@ -159,8 +160,8 @@ def _allocate_buffers_for_outputs(
       padded_val = interpret_utils.pad_to_block_dimension(
           out_val, output_block_shapes[output_idx],
           interpret_params.uninitialized_memory)
-      allocation_request = gpu_callbacks.make_allocation_request_array(
-          device_id=device_id,
+      allocation_request = gpu_callbacks.call_make_allocation_request_array(
+          device_id=jnp.int32(device_id),
           # All outputs of a `pallas_call`/`core_map` that are arrays (i.e. that
           # are not sempahores, barriers etc.) are placed in `GMEM`. Results
           # from executing the kernel (or slices thereof) may need to be copied
@@ -171,7 +172,7 @@ def _allocate_buffers_for_outputs(
           initial_ref_count=num_threads,
       )
       output_buffer_key = gpu_callbacks.call_allocate_buffer_for_all_threads(
-          device_id, allocation_request, padded_val
+          jnp.int32(device_id), None, allocation_request, padded_val
       )
       output_buffer_keys_and_values.append(
           AllocationKeyAndValue(key=output_buffer_key, value=out_val)
@@ -211,8 +212,8 @@ def _get_kernel_buffers(
       if is_output:
         kernel_buffer_keys.append(output_buffer_keys[output_idx])
     else:
-      allocation_request = gpu_callbacks.make_allocation_request_array(
-          device_id=device_id,
+      allocation_request = gpu_callbacks.call_make_allocation_request_array(
+          device_id=jnp.int32(device_id),
           memory_space_id=gpu_callbacks.get_memory_space_idx(aval.memory_space),
           initial_ref_count=num_threads,
       )
@@ -221,7 +222,7 @@ def _get_kernel_buffers(
       )
       kernel_buffer_keys.append(
           gpu_callbacks.call_allocate_buffer_for_all_threads(
-              device_id, allocation_request, init_val
+              jnp.int32(device_id), None, allocation_request, init_val
           )
       )
 
@@ -229,7 +230,8 @@ def _get_kernel_buffers(
 
 
 def _get_outputs(
-    device_id: int, output_buffers: Sequence[AllocationKeyAndValue]
+    device_id: int,
+    output_buffers: Sequence[AllocationKeyAndValue],
 ) -> Sequence[Array]:
   """Reads and returns values from the allocated output buffers."""
   outputs = []
@@ -237,9 +239,10 @@ def _get_outputs(
     outputs.append(
         gpu_callbacks.call_get(
             result_shape_and_dtype=buffer.value,
-            device_id=device_id,
-            thread_id=0,
-            allocation_key=buffer.key,
+            device_id=jnp.int32(device_id),
+            grid_point_coords=None,
+            thread_id=jnp.int32(0),
+            allocation_key_as_array=buffer.key,
             transforms=(),  # Read the entire buffer.
         )
     )
@@ -250,7 +253,8 @@ def _get_outputs(
 def _load_and_store_between_allocation_keys(
     *,
     device_id: int,
-    thread_id: int,
+    grid_point_coords: jax.Array,
+    thread_id: jax.Array,
     share_and_dtype: Any,
     load_allocation_key: jax.Array,
     store_allocation_key: jax.Array,
@@ -258,16 +262,18 @@ def _load_and_store_between_allocation_keys(
 ):
   loaded_value = gpu_callbacks.call_get(
       result_shape_and_dtype=share_and_dtype,
-      device_id=device_id,
+      device_id=jnp.int32(device_id),
+      grid_point_coords=grid_point_coords,
       thread_id=thread_id,
-      allocation_key=load_allocation_key,
+      allocation_key_as_array=load_allocation_key,
       transforms=transform,
   )
   gpu_callbacks.call_swap(
       result_shape_and_dtype=share_and_dtype,
-      device_id=device_id,
+      device_id=jnp.int32(device_id),
+      grid_point_coords=grid_point_coords,
       thread_id=thread_id,
-      allocation_key=store_allocation_key,
+      allocation_key_as_array=store_allocation_key,
       transforms=transform,
       val=loaded_value,
       mask=None,
@@ -276,7 +282,8 @@ def _load_and_store_between_allocation_keys(
 
 def _copy_from_gmem_buffers(
     device_id: int,
-    thread_id: int,
+    grid_point_coords: jax.Array,
+    thread_id: jax.Array,
     avals: Sequence[Any],
     gmem_buffer_keys: Sequence[jax.Array],
     target_buffer_keys: Sequence[jax.Array],
@@ -288,6 +295,7 @@ def _copy_from_gmem_buffers(
       continue
     _load_and_store_between_allocation_keys(
         device_id=device_id,
+        grid_point_coords=grid_point_coords,
         thread_id=thread_id,
         share_and_dtype=aval,
         load_allocation_key=gmem_buffer_key,
@@ -298,7 +306,8 @@ def _copy_from_gmem_buffers(
 
 def _copy_to_gmem_buffers(
     device_id: int,
-    thread_id: int,
+    grid_point_coords: jax.Array,
+    thread_id: jax.Array,
     avals: Sequence[Any],
     source_buffer_keys: Sequence[jax.Array],
     gmem_buffer_keys: Sequence[jax.Array],
@@ -310,6 +319,7 @@ def _copy_to_gmem_buffers(
       continue
     _load_and_store_between_allocation_keys(
         device_id=device_id,
+        grid_point_coords=grid_point_coords,
         thread_id=thread_id,
         share_and_dtype=aval,
         load_allocation_key=source_buffer_key,
@@ -351,9 +361,9 @@ def interpret_pallas_call(
   )
 
   gpu_callbacks.call_initialize_shared_memory(
-      num_gpus=device_info.num_devices,
-      num_threads_per_block=num_threads,
-      num_blocks_per_cluster=num_blocks_per_cluster,
+      num_gpus=jnp.int32(device_info.num_devices),
+      num_threads_per_block=jnp.int32(num_threads),
+      num_blocks_per_cluster=jnp.int32(num_blocks_per_cluster),
       interpret_params=interpret_params,
   )
 
@@ -404,7 +414,7 @@ def interpret_pallas_call(
       jaxpr.invars[grid_mapping.slice_block_ops], [grid_mapping.num_inputs]
   )
 
-  def _kernel(thread_id, grid_point_coords):
+  def _kernel(thread_id, _, grid_point_coords):
     # Note that the copying from `GMEM` buffers here could introduce races when
     # multiple threads copy to the same kernel input buffer. For this to happen,
     # (a) there must be multiple threads and (b) the targeted kernel input
@@ -419,6 +429,7 @@ def interpret_pallas_call(
     # `BlockSpec`s. (Currently only trivial `BlockSpec`s are supported.)
     _copy_from_gmem_buffers(
         device_id=device_info.device_id,
+        grid_point_coords=grid_point_coords,
         thread_id=thread_id,
         avals=[var.aval for var in input_vars],
         gmem_buffer_keys=input_buffer_keys,
@@ -444,6 +455,7 @@ def interpret_pallas_call(
     # `BlockSpec`s. (Currently only trivial `BlockSpec`s are supported.)
     _copy_to_gmem_buffers(
         device_id=device_info.device_id,
+        grid_point_coords=grid_point_coords,
         thread_id=thread_id,
         avals=[var.aval for var in output_vars],
         source_buffer_keys=kernel_output_buffer_keys,
@@ -458,16 +470,20 @@ def interpret_pallas_call(
         grid_dims, loop_idx
     )
     thread_map.thread_map(
-        _kernel, math.prod(cluster_dims) * num_threads, grid_point_coords
+        _kernel,
+        math.prod(cluster_dims) * num_threads,
+        jnp.int32(0),
+        grid_point_coords,
+        use_ordered_callback=True,
     )
+    # TODO(nrink): Determine if any synchronization between the vector clocks is
+    # required at this point, i.e. when a set of concurrent threads is done.
 
-  # TODO(nrink): Should we only create happens-before here from thread 0 to
-  # the other threads? Currently we update the vector clocks for all threads by
-  # looking at the vector clock of all (other) threads. It should suffice, but
-  # this needs to be confirmed, to update the vector clocks for all threads by
-  # looking only at the vector clock of thread 0 (and at the vector clock for
-  # the thread itself).
-  gpu_callbacks.call_update_clocks_for_device_barrier(device_info.device_id)
+  # Synchronize all clocks before we start launching concurrent threads (in the
+  # body of the `fori_loop` below that loops over the grid points).
+  gpu_callbacks.call_update_clocks_for_device_barrier(
+      jnp.int32(device_info.device_id)
+  )
 
   # TODO(nrink): For now we execute the grid by sequentially looping over the
   # points in the grid. This may need to be refined to be more faithful to the
@@ -475,11 +491,12 @@ def interpret_pallas_call(
   # execute all grid points fully concurrently, e.g. in individual threads.)
   jax.lax.fori_loop(0, num_grid_loop_iterations, _grid_loop_body, None)
 
-  # TODO(nrink): Should we only create happens-before here from the other
-  # threads to thread 0? Analogous to the comment above, it should suffice, but
-  # this needs to be confirmed, to update only the vector clock of thread 0 (and
-  # not the vector clocks for all other threads).
-  gpu_callbacks.call_update_clocks_for_device_barrier(device_info.device_id)
+  # Synchronize all clocks after processing all grid points (i.e. blocks; in the
+  # `fori_loop` above). If we do not do this, then reading the output buffers
+  # in `_get_outputs` below may lead to races being detected.
+  gpu_callbacks.call_update_clocks_for_device_barrier(
+      jnp.int32(device_info.device_id)
+  )
 
   outputs = _get_outputs(device_info.device_id, output_buffers)
 

@@ -100,6 +100,42 @@ def osp_linalg_toeplitz(c: np.ndarray, r: np.ndarray | None = None) -> np.ndarra
     return np.vectorize(
       scipy.linalg.toeplitz, signature="(m),(n)->(m,n)", otypes=(np.result_type(c, r),))(c, r)
 
+def osp_linalg_circulant(c: np.ndarray) -> np.ndarray:
+  """Batched scipy circulant for testing."""
+  if scipy_version >= (1, 15):
+    return scipy.linalg.circulant(c)
+  c = np.atleast_1d(c)
+  return np.vectorize(
+      scipy.linalg.circulant, signature="(n)->(n,n)", otypes=(c.dtype,))(c)
+
+def osp_linalg_companion(a: np.ndarray) -> np.ndarray:
+  """Batched scipy companion for testing."""
+  if scipy_version >= (1, 15):
+    return scipy.linalg.companion(a)
+  a = np.atleast_1d(a)
+  out_dtype = np.result_type(a.dtype, np.float32)
+  return np.vectorize(
+      scipy.linalg.companion, signature="(n)->(m,m)", otypes=(out_dtype,))(a)
+
+def osp_linalg_leslie(f: np.ndarray, s: np.ndarray) -> np.ndarray:
+  """Batched scipy leslie for testing."""
+  f = np.atleast_1d(f)
+  s = np.atleast_1d(s)
+  if scipy_version >= (1, 15):
+    return scipy.linalg.leslie(f, s)
+  out_dtype = np.result_type(f.dtype, s.dtype)
+  return np.vectorize(
+      scipy.linalg.leslie, signature="(n),(m)->(n,n)",
+      otypes=(out_dtype,))(f, s)
+
+def osp_linalg_fiedler(a: np.ndarray) -> np.ndarray:
+  """Batched scipy fiedler for testing."""
+  a = np.atleast_1d(a)
+  if scipy_version >= (1, 15):
+    return scipy.linalg.fiedler(a)
+  return np.vectorize(
+      scipy.linalg.fiedler, signature="(n)->(n,n)", otypes=(a.dtype,))(a)
+
 def osp_linalg_hankel(c: np.ndarray, r: np.ndarray | None = None) -> np.ndarray:
   """Batched scipy hankel for testing."""
   if scipy_version >= (1, 19):
@@ -404,6 +440,45 @@ class NumpyLinalgTest(jtu.JaxTestCase):
     tol = 1e-4 if dtype in (np.float64, np.complex128) else 1e-1
     jtu.check_grads(lambda x: jnp.linalg.eigvals(x), (a,), order=1,
                     modes=['fwd', 'rev'], rtol=tol, atol=tol)
+
+  @jtu.sample_product(
+    shape=[(4, 4), (5, 5)],
+    dtype=complex_types,
+    left_right=[(False, True), (True, False), (True, True)],
+  )
+  @jtu.run_on_devices("cpu", "gpu")
+  def testEigGradComplexInputs(self, shape, dtype, left_right):
+    # Small matrices only; the eigenvector derivative blows up like
+    # 1/min|w_i - w_j| so close eigenvalues make the FD check noisy.
+    left, right = left_right
+    rng = jtu.rand_default(self.rng())
+    a = rng(shape, dtype)
+    tol = 1e-3 if dtype == np.complex128 else 5e-1
+    f = partial(lax.linalg.eig, compute_left_eigenvectors=left,
+                compute_right_eigenvectors=right, enable_eigvec_derivs=True)
+    jtu.check_grads(f, (a,), order=2, rtol=tol, atol=tol)
+
+  @jtu.sample_product(
+    shape=[(4, 4), (5, 5)],
+    dtype=float_types,
+    left_right=[(False, True), (True, False), (True, True)],
+  )
+  @jtu.run_on_devices("cpu", "gpu")
+  def testEigGradRealInputs(self, shape, dtype, left_right):
+    # dgeev does not pin the sign of complex-pair eigenvectors so the primal
+    # output is itself discontinuous; compose with elementwise v -> v*v which
+    # is sign-invariant but still phase-sensitive (so still exercises the
+    # gauge-fixing part of the JVP).
+    left, right = left_right
+    rng = jtu.rand_default(self.rng())
+    a = rng(shape, dtype)
+    tol = 1e-3 if dtype == np.float64 else 5e-1
+    def f(a):
+      out = lax.linalg.eig(a, compute_left_eigenvectors=left,
+                           compute_right_eigenvectors=right,
+                           enable_eigvec_derivs=True)
+      return (out[0],) + tuple(v * v for v in out[1:])
+    jtu.check_grads(f, (a,), order=2, rtol=tol, atol=tol)
 
   @jtu.sample_product(
     shape=[(4, 4), (5, 5), (50, 50)],
@@ -1035,14 +1110,14 @@ class NumpyLinalgTest(jtu.JaxTestCase):
   @jtu.ignore_warning(message="invalid value", category=RuntimeWarning)
   def testPinv(self, shape, hermitian, dtype):
     rng = jtu.rand_default(self.rng())
-    args_maker = lambda: [rng(shape, dtype)]
-
-    jnp_fn = partial(jnp.linalg.pinv, hermitian=hermitian)
-    def np_fn(a):
-      # Symmetrize the input matrix to match the jnp behavior.
+    def args_maker():
+      a = rng(shape, dtype)
       if hermitian:
         a = (a + T(a.conj())) / 2
-      return np.linalg.pinv(a, hermitian=hermitian)
+      return [a]
+
+    np_fn = partial(np.linalg.pinv, hermitian=hermitian)
+    jnp_fn = partial(jnp.linalg.pinv, hermitian=hermitian)
     self._CheckAgainstNumpy(np_fn, jnp_fn, args_maker, tol=1e-4)
     self._CompileAndCheck(jnp_fn, args_maker, atol=1e-5)
 
@@ -1095,17 +1170,25 @@ class NumpyLinalgTest(jtu.JaxTestCase):
     self.assertArraysEqual(np_result, jnp_result)
 
   @jtu.sample_product(
-    shape=[(3, ), (1, 2), (8, 5), (4, 4), (5, 5), (50, 50), (3, 4, 5),
-           (2, 3, 4, 5)],
+    [dict(shape=shape, hermitian=hermitian)
+     for shape in [(3, ), (1, 2), (8, 5), (4, 4), (5, 5), (50, 50), (3, 4, 5),
+                   (2, 3, 4, 5)]
+     for hermitian in ([False, True] if len(shape) >= 2 and shape[-1] == shape[-2] else [False])],
     dtype=float_types + complex_types,
   )
-  def testMatrixRank(self, shape, dtype):
+  def testMatrixRank(self, shape, dtype, hermitian):
     rng = jtu.rand_default(self.rng())
-    args_maker = lambda: [rng(shape, dtype)]
-    a, = args_maker()
-    self._CheckAgainstNumpy(np.linalg.matrix_rank, jnp.linalg.matrix_rank,
+    def args_maker():
+      a = rng(shape, dtype)
+      if hermitian:
+        a = (a + T(a.conj())) / 2
+      return [a]
+
+    np_fn = partial(np.linalg.matrix_rank, hermitian=hermitian)
+    jnp_fn = partial(jnp.linalg.matrix_rank, hermitian=hermitian)
+    self._CheckAgainstNumpy(np_fn, jnp_fn,
                             args_maker, check_dtypes=False, tol=1e-3)
-    self._CompileAndCheck(jnp.linalg.matrix_rank, args_maker,
+    self._CompileAndCheck(jnp_fn, args_maker,
                           check_dtypes=False, rtol=1e-3)
 
   def testMatrixRankTol(self):
@@ -1175,7 +1258,7 @@ class NumpyLinalgTest(jtu.JaxTestCase):
   )
   def testLstsqZeroMatrix(self, shape):
     # Regression test for https://github.com/jax-ml/jax/issues/32666
-    args_maker = lambda: [np.zeros(shape), np.ones((shape))]
+    args_maker = lambda: [np.zeros(shape), np.ones(shape)]
     np_fun = np.linalg.lstsq
     jnp_fun = partial(jnp.linalg.lstsq, numpy_resid=True)
     self._CheckAgainstNumpy(np_fun, jnp_fun, args_maker, check_dtypes=False)
@@ -2267,6 +2350,66 @@ class ScipyLinalgTest(jtu.JaxTestCase):
       )
       self._CompileAndCheck(jsp.linalg.hankel, args_maker)
 
+  @jtu.sample_product(
+     shape=[(), (3,), (0,), (1,), (5,), (2, 3), (1, 2, 4)],
+     dtype=float_types + complex_types + int_types,
+  )
+  def testCirculantConstruction(self, shape, dtype):
+    rng = jtu.rand_default(self.rng())
+    args_maker = lambda: [rng(shape, dtype)]
+    self._CheckAgainstNumpy(osp_linalg_circulant, jsp.linalg.circulant, args_maker)
+    self._CompileAndCheck(jsp.linalg.circulant, args_maker)
+
+  @jtu.sample_product(
+     n=[2, 3, 5, 8],
+     batch=[(), (2,), (1, 3)],
+     dtype=float_types + int_types,
+  )
+  def testLeslie(self, n, batch, dtype):
+    rng = jtu.rand_default(self.rng())
+    f_shape = batch + (n,)
+    s_shape = batch + (n - 1,)
+    args_maker = lambda: [rng(f_shape, dtype), rng(s_shape, dtype)]
+    self._CheckAgainstNumpy(osp_linalg_leslie, jsp.linalg.leslie, args_maker,
+                            check_dtypes=False)
+    self._CompileAndCheck(jsp.linalg.leslie, args_maker)
+
+  def testLeslieInvalidLength(self):
+    with self.assertRaisesRegex(ValueError, "length of f along the last axis"):
+      jsp.linalg.leslie(jnp.array([1.0]), jnp.array([]))
+    with self.assertRaisesRegex(ValueError, "Incorrect lengths for f and s"):
+      jsp.linalg.leslie(jnp.array([1., 2., 3.]), jnp.array([0.5]))
+    with self.assertRaisesRegex(ValueError, "Incorrect lengths for f and s"):
+      jsp.linalg.leslie(jnp.array([1., 2.]), jnp.array([]))
+
+  @jtu.sample_product(
+     shape=[(2,), (3,), (5,), (8,), (2, 3), (1, 2, 4)],
+     dtype=float_types + complex_types + int_types,
+  )
+  def testCompanion(self, shape, dtype):
+    rng = jtu.rand_nonzero(self.rng())
+    args_maker = lambda: [rng(shape, dtype)]
+    tol = {np.complex64: 1e-5, np.float32: 1e-5}
+    self._CheckAgainstNumpy(osp_linalg_companion, jsp.linalg.companion,
+                            args_maker, atol=tol, rtol=tol, check_dtypes=False)
+    self._CompileAndCheck(jsp.linalg.companion, args_maker)
+
+  @jtu.sample_product(shape=[(0,), (1,), (3, 0), (3, 1)])
+  def testCompanionInvalidLength(self, shape):
+    a = jnp.zeros(shape)
+    with self.assertRaisesRegex(ValueError, "length of `a` along the last axis"):
+      jsp.linalg.companion(a)
+
+  @jtu.sample_product(
+     shape=[(), (1,), (3,), (5,), (2, 3), (1, 2, 4)],
+     dtype=float_types + int_types,
+  )
+  def testFiedler(self, shape, dtype):
+    rng = jtu.rand_default(self.rng())
+    args_maker = lambda: [rng(shape, dtype)]
+    self._CheckAgainstNumpy(osp_linalg_fiedler, jsp.linalg.fiedler, args_maker,
+                            check_dtypes=False)
+    self._CompileAndCheck(jsp.linalg.fiedler, args_maker)
 
   @jtu.sample_product(
     shape=[(2, 3), (4, 6), (50, 7), (100, 110)],
@@ -2384,8 +2527,7 @@ class LaxLinalgTest(jtu.JaxTestCase):
                       k_rhs=[1, 2],
                       perturb_singular=[False, True])
   def test_tridiagonal_solve(self, shape, dtype, k_rhs, perturb_singular):
-    if perturb_singular and jaxlib_version < (0, 10):
-      self.skipTest("perturb_singular=True requires jaxlib >= 0.10")
+
     if perturb_singular and not jtu.test_device_matches(["cpu", "gpu"]):
       self.skipTest("perturb_singular=True only supported on CPU and GPU")
     # TODO: Add these tests back once rocSparse issues are fixed.
@@ -2412,8 +2554,7 @@ class LaxLinalgTest(jtu.JaxTestCase):
 
   @jtu.sample_product(perturb_singular=[False, True])
   def test_tridiagonal_solve_zero_matrix(self, perturb_singular):
-    if perturb_singular and jaxlib_version < (0, 10):
-      self.skipTest("perturb_singular=True requires jaxlib >= 0.10")
+
     if perturb_singular and not jtu.test_device_matches(["cpu", "gpu"]):
       self.skipTest("perturb_singular=True only supported on CPU and GPU")
     dtype = np.float32
@@ -2434,8 +2575,7 @@ class LaxLinalgTest(jtu.JaxTestCase):
   def test_tridiagonal_solve_requiring_pivoting(self, perturb_singular):
     if not jtu.test_device_matches(["cpu", "gpu"]):
       self.skipTest("Pivoting not supported in fallback tridiagonal solve")
-    if perturb_singular and jaxlib_version < (0, 10):
-      self.skipTest("perturb_singular=True requires jaxlib >= 0.10")
+
     # TODO(magaonka-amd): Re-enable once hipSPARSE gtsv2 numerical issues are resolved.
     if jtu.is_device_rocm() and not perturb_singular:
       self.skipTest(
@@ -2453,8 +2593,7 @@ class LaxLinalgTest(jtu.JaxTestCase):
   def test_tridiagonal_solve_requiring_pivoting_last_rows(self, perturb_singular):
     if not jtu.test_device_matches(["cpu", "gpu"]):
       self.skipTest("Pivoting not supported in fallback tridiagonal solve")
-    if perturb_singular and jaxlib_version < (0, 10):
-      self.skipTest("perturb_singular=True requires jaxlib >= 0.10")
+
     # TODO(magaonka-amd): Re-enable once hipSPARSE gtsv2 numerical issues are resolved.
     if jtu.is_device_rocm() and not perturb_singular:
       self.skipTest(
@@ -2470,8 +2609,7 @@ class LaxLinalgTest(jtu.JaxTestCase):
 
   @jtu.sample_product(perturb_singular=[False, True])
   def test_tridiagonal_solve_2x2_singular(self, perturb_singular):
-    if perturb_singular and jaxlib_version < (0, 10):
-      self.skipTest("perturb_singular=True requires jaxlib >= 0.10")
+
     if perturb_singular and not jtu.test_device_matches(["cpu", "gpu"]):
       self.skipTest("perturb_singular=True only supported on CPU and GPU")
     dl = np.array([0.0, 1.0], dtype=np.float32)
@@ -2489,8 +2627,7 @@ class LaxLinalgTest(jtu.JaxTestCase):
 
   @jtu.sample_product(perturb_singular=[False, True])
   def test_tridiagonal_solve_endpoints(self, perturb_singular):
-    if perturb_singular and jaxlib_version < (0, 10):
-      self.skipTest("perturb_singular=True requires jaxlib >= 0.10")
+
     if perturb_singular and not jtu.test_device_matches(["cpu", "gpu"]):
       self.skipTest("perturb_singular=True only supported on CPU and GPU")
     # tridagonal_solve shouldn't depend on the endpoints being explicitly zero.
@@ -2512,8 +2649,7 @@ class LaxLinalgTest(jtu.JaxTestCase):
   @jtu.sample_product(shape=[(3,), (3, 4)], dtype=float_types + complex_types,
                       perturb_singular=[False, True])
   def test_tridiagonal_solve_grad(self, shape, dtype, perturb_singular):
-    if perturb_singular and jaxlib_version < (0, 10):
-      self.skipTest("perturb_singular=True requires jaxlib >= 0.10")
+
     if perturb_singular and not jtu.test_device_matches(["cpu", "gpu"]):
       self.skipTest("perturb_singular=True only supported on CPU and GPU")
     # TODO: Add these tests back once rocSparse issues are fixed.
@@ -2580,6 +2716,64 @@ class LaxLinalgTest(jtu.JaxTestCase):
     jsp_fun = partial(jsp.linalg.hilbert, n=n)
     self._CheckAgainstNumpy(osp_fun, jsp_fun, args_maker)
     self._CompileAndCheck(jsp_fun, args_maker)
+
+  @jtu.sample_product(
+    n=[1, 2, 4, 8, 16],
+    dtype=int_types + float_types,
+  )
+  def testHadamard(self, n, dtype):
+    args_maker = lambda: []
+    osp_fun = partial(osp.linalg.hadamard, n=n, dtype=dtype)
+    jsp_fun = partial(jsp.linalg.hadamard, n=n, dtype=dtype)
+    self._CheckAgainstNumpy(osp_fun, jsp_fun, args_maker)
+    self._CompileAndCheck(jsp_fun, args_maker)
+
+  @jtu.sample_product(n=[0, -1, 3, 5, 7])
+  def testHadamardInvalidN(self, n):
+    with self.assertRaisesRegex(ValueError, "positive power of 2"):
+      jsp.linalg.hadamard(n)
+
+  @jtu.sample_product(
+    n=[1, 2, 3, 4, 5, 8],
+    full=[False, True],
+  )
+  def testHelmert(self, n, full):
+    args_maker = lambda: []
+    osp_fun = partial(osp.linalg.helmert, n=n, full=full)
+    jsp_fun = partial(jsp.linalg.helmert, n=n, full=full)
+    self._CheckAgainstNumpy(osp_fun, jsp_fun, args_maker,
+                            atol=1e-5, rtol=1e-5, check_dtypes=False)
+    self._CompileAndCheck(jsp_fun, args_maker)
+
+  @jtu.sample_product(n=[0, -1, -5])
+  def testHelmertInvalidN(self, n):
+    with self.assertRaisesRegex(ValueError, "n must be a positive integer"):
+      jsp.linalg.helmert(n)
+
+  @jtu.sample_product(
+    n=[0, 1, 2, 3, 5, 8, 16],
+    scale=[None, 'sqrtn', 'n'],
+  )
+  def testDft(self, n, scale):
+    args_maker = lambda: []
+    osp_fun = partial(osp.linalg.dft, n=n, scale=scale)
+    jsp_fun = partial(jsp.linalg.dft, n=n, scale=scale)
+    self._CheckAgainstNumpy(osp_fun, jsp_fun, args_maker,
+                            atol=1e-5, rtol=1e-5, check_dtypes=False)
+    self._CompileAndCheck(jsp_fun, args_maker)
+
+  def testDftInvalidScale(self):
+    with self.assertRaisesRegex(ValueError, "scale must be"):
+      jsp.linalg.dft(4, scale='bad')
+
+  @jtu.sample_product(dtype=complex_types)
+  def testDftDtype(self, dtype):
+    result = jsp.linalg.dft(4, dtype=dtype)
+    self.assertEqual(result.dtype, dtype)
+
+  def testDftInvalidDtype(self):
+    with self.assertRaisesRegex(ValueError, "dtype must be"):
+      jsp.linalg.dft(4, dtype=jnp.float32)
 
   @jtu.sample_product(
       shape=[(5, 1), (10, 4), (128, 12)],

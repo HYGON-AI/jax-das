@@ -107,12 +107,10 @@ class ShardingTest(tf_test_util.JaxToTfTestCase):
       backend = xla_bridge.get_backend()
       device_assignment = np.arange(num_partitions * num_replicas)
       device_assignment = np.reshape(device_assignment, (-1, num_partitions))
-      use_spmd_partitioning = num_partitions > 1
       compile_options = compiler.get_compile_options(
           num_replicas=num_replicas,
           num_partitions=num_partitions,
           device_assignment=device_assignment,
-          use_spmd_partitioning=use_spmd_partitioning,
       )
       executable = backend.compile_and_load(
           jax_hlo, xc.DeviceList(tuple(self.devices.flat)), compile_options)
@@ -485,7 +483,7 @@ class ShardingTest(tf_test_util.JaxToTfTestCase):
     mesh = Mesh(self.devices, axis_names=('x'))
     a = np.arange(4 * 4, dtype=np.float32).reshape((4, 4))
 
-    @partial(jax.jit,
+    @jax.jit(
              in_shardings=(NamedSharding(mesh, P("x", None)),),
              out_shardings=NamedSharding(mesh, P(None, "x")))
     @partial(shard_map, mesh=mesh,
@@ -524,7 +522,7 @@ class ShardingTest(tf_test_util.JaxToTfTestCase):
   def test_repro_xla_bug_shmap_collective_permute(self):
     mesh = Mesh(self.devices, axis_names=('x'))
 
-    @partial(jax.jit,
+    @jax.jit(
              in_shardings=(P('x', None),), out_shardings=P('x', None))
     @partial(shard_map, mesh=mesh,
              in_specs=(P('x', None),), out_specs=P('x', None))
@@ -560,7 +558,7 @@ class ShardingTest(tf_test_util.JaxToTfTestCase):
     mesh = Mesh(self.devices, axis_names=("x"))
     a = np.arange(4 * 4, dtype=np.float32).reshape((4, 4))
 
-    @partial(jax.jit,
+    @jax.jit(
              in_shardings=(NamedSharding(mesh, P("x", None)),),
                            out_shardings=NamedSharding(mesh, P("x", None)))
     @partial(shard_map, mesh=mesh,

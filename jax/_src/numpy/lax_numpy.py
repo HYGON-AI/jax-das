@@ -464,7 +464,7 @@ def isscalar(element: Any) -> bool:
     return True
   elif isinstance(element, (np.ndarray, Array)):
     return element.ndim == 0
-  elif hasattr(element, '__jax_array__'):
+  elif getattr(element, '__jax_array__', None) is not None:
     return asarray(element).ndim == 0
   return False
 
@@ -969,7 +969,7 @@ def histogram2d(x: ArrayLike, y: ArrayLike, bins: ArrayLike | list[ArrayLike] = 
 
   if N != 1 and N != 2:
     x_edges = y_edges = asarray(bins)
-    bins = [x_edges, y_edges]
+    bins = [x_edges, y_edges]  # pyrefly: ignore[bad-assignment]
 
   sample = transpose(asarray([x, y]))
   hist, edges = histogramdd(sample, bins, range, weights, density)
@@ -4378,18 +4378,15 @@ def stack(arrays: np.ndarray | Array | Sequence[ArrayLike],
     return concatenate(expand_dims(arrays, axis + 1), axis=axis, dtype=dtype)
   else:
     arrays = util.ensure_arraylike_tuple("stack", arrays)
-    shape0 = np.shape(arrays[0])
-    axis = _canonicalize_axis(axis, len(shape0) + 1)
-    new_arrays = []
-    for a in arrays:
-      if np.shape(a) != shape0:
-        raise ValueError("All input arrays must have the same shape.")
-      new_arrays.append(expand_dims(a, axis))
-    return concatenate(new_arrays, axis=axis, dtype=dtype)
+    if dtype is not None:
+      arrays = [asarray(a, dtype=dtype) for a in arrays]
+    else:
+      arrays = util.promote_dtypes(*arrays)
+    return lax.stack(arrays, axis=axis)
 
 
 @export
-@api.jit(static_argnames="axis")
+@api.jit(static_argnames="axis", inline=True)
 def unstack(x: ArrayLike, /, *, axis: int = 0) -> tuple[Array, ...]:
   """Unstack an array along an axis.
 
@@ -4421,16 +4418,7 @@ def unstack(x: ArrayLike, /, *, axis: int = 0) -> tuple[Array, ...]:
            [4, 5, 6]], dtype=int32)
   """
   x = util.ensure_arraylike("unstack", x)
-  if x.ndim == 0:
-    raise ValueError(
-      "Unstack requires arrays with rank > 0, however a scalar array was "
-      "passed."
-    )
-  dimensions = (axis,)
-  return tuple(
-    lax.squeeze(t, dimensions)
-    for t in lax.split(x, (1,) * x.shape[axis], axis=axis)
-  )
+  return lax.unstack(x, axis=axis)
 
 
 @export
@@ -4552,14 +4540,8 @@ def concatenate(arrays: np.ndarray | Array | Sequence[ArrayLike],
     arrays_out = util.promote_dtypes(*arrays)
   else:
     arrays_out = [asarray(arr, dtype=dtype) for arr in arrays]
-  # lax.concatenate can be slow to compile for wide concatenations, so form a
-  # tree of concatenations as a workaround especially for op-by-op mode.
-  # (https://github.com/jax-ml/jax/issues/653).
-  k = 16
-  while len(arrays_out) > 1:
-    arrays_out = [lax.concatenate(arrays_out[i:i+k], axis)
-                  for i in range(0, len(arrays_out), k)]
-  return arrays_out[0]
+  return lax.concatenate(arrays_out, axis)
+
 
 
 @export
@@ -7346,8 +7328,8 @@ def _diag(v: Array, k: int):
   if len(v_shape) == 1:
     zero = lambda x: lax.full_like(x, shape=(), fill_value=0)
     n = v_shape[0] + abs(k)
-    v = lax.pad(v, zero(v), ((max(0, k), max(0, -k), 0),))
-    return where(eye(n, k=k, dtype=bool), v, array_creation.zeros_like(v))
+    v = lax.pad(v, zero(v), ((max(0, -k), max(0, k), 0),))
+    return where(eye(n, k=k, dtype=bool), v[:, None], zero(v))
   elif len(v_shape) == 2:
     return diagonal(v, offset=k)
   else:
@@ -7649,8 +7631,9 @@ def delete(
   # NB: pass both arrays to check for appropriate error message.
   util.check_arraylike("delete", a, obj)
   # Can't use ensure_arraylike here because obj may be static.
-  if hasattr(obj, "__jax_array__"):
-    obj = obj.__jax_array__()
+  m = getattr(obj, "__jax_array__", None)
+  if m is not None:
+    obj = m()
 
   # Case 3a: unique integer indices; delete in a JIT-compatible way
   if issubdtype(_dtype(obj), np.integer) and assume_unique_indices:

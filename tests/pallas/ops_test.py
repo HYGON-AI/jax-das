@@ -1159,21 +1159,26 @@ class OpsTest(PallasBaseTest):
       self.skipTest("64-bit types require x64_enabled")
 
     if jtu.test_device_matches(["tpu"]):
-      if dtype in ("int16", "float16"):
-        if not (
-            jtu.is_device_tpu_at_least(6)
-            and dtype == "int16"
-            and fn == jnp.negative
-        ):
-          self.skipTest("int16 and float16 are not supported on TPU")
+      if dtype == "float16":
+        self.skipTest("float16 is not supported on TPU")
+      if dtype == "int16":
+        if fn in (jnp.sign, jnp.abs) and not jtu.is_device_tpu_at_least(4):
+          self.skipTest("requires TPU v4+")
+        if fn == jnp.abs and not jtu.is_cloud_tpu_at_least(2026, 5, 10):
+          self.skipTest("requires newer libTPU")
       if (
           fn in (jnp.ceil, jnp.floor, jnp.sqrt, lax.rsqrt)
           and dtype == "bfloat16"
           and not jtu.is_device_tpu_at_least(6)
+          and not jtu.is_cloud_tpu_at_least(2026, 4, 27)
       ):
-        self.skipTest(f"bfloat16 {fn.__name__} is only supported on TPU v6+")
-      if fn == jnp.log1p and dtype == "bfloat16":
-        self.skipTest(f"bfloat16 {fn.__name__} is not supported on TPU")
+        self.skipTest("requires newer libTPU")
+      if (
+          fn == jnp.log1p
+          and dtype == "bfloat16"
+          and not jtu.is_cloud_tpu_at_least(2026, 5, 12)
+      ):
+        self.skipTest("requires newer libTPU")
       # TODO(b/370578663): implement these lowerings on TPU
       if fn in (
           jnp.acos, jnp.acosh, jnp.asin, jnp.asinh, jnp.atan, jnp.atanh,
@@ -1960,8 +1965,6 @@ class OpsTest(PallasBaseTest):
     self.skip_if_mosaic_gpu()
 
     if jtu.test_device_matches(["tpu"]):
-      if not in_shape and not jtu.is_cloud_tpu_at_least(2026, 3, 29):
-        self.skipTest("Requires a newer libTPU")
       if in_shape in [(1, 2, 1, 4, 1), (2, 4, 1)] and jtu.get_tpu_version() < 5:
         self.skipTest("Requires sublane gather support")
 
@@ -2066,21 +2069,13 @@ class OpsTest(PallasBaseTest):
 
     in_shape, out_shape, dims = shape_spec
     if jtu.test_device_matches(["tpu"]):
-      if not in_shape and not jtu.is_cloud_tpu_at_least(2026, 3, 29):
-        self.skipTest("Requires a newer libTPU")
       if len(out_shape) == 1 and dtype not in {jnp.int32, jnp.bool_}:
         if dtype == jnp.int8:
           if not jtu.is_device_tpu_at_least(5):
             self.skipTest("Requires TPUv5+")
-          if not jtu.is_cloud_tpu_at_least(2026, 4, 8):
-            self.skipTest("Requires a newer libTPU")
         # 16-bit case
         if jtu.get_tpu_version() < 4:
           self.skipTest("Requires TPUv4+")
-        if jtu.get_tpu_version() < 6 and not jtu.is_cloud_tpu_at_least(
-            2026, 4, 6
-        ):
-          self.skipTest("Requires a newer libTPU")
 
     if not in_shape:
       in_specs = [pl.BlockSpec(memory_space=smem_on_tpu())]

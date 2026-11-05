@@ -22,11 +22,14 @@ load("@jax_wheel//:wheel.bzl", "WHEEL_VERSION")
 load("@jax_wheel_version_suffix//:wheel_version_suffix.bzl", "WHEEL_VERSION_SUFFIX")
 load("@local_config_cuda//cuda:build_defs.bzl", _cuda_library = "cuda_library", _if_cuda_is_configured = "if_cuda_is_configured")
 load("@local_config_rocm//rocm:build_defs.bzl", _if_rocm_is_configured = "if_rocm_is_configured", _rocm_library = "rocm_library")
+
+# TODO(Intel-tf): Update `sycl` with `oneapi` when xla changes to use `oneapi`.
+load("@local_config_sycl//sycl:build_defs.bzl", _if_oneapi_is_configured = "if_sycl_is_configured", _oneapi_library = "sycl_library")
 load("@nvidia_wheel_versions//:versions.bzl", "NVIDIA_WHEEL_VERSIONS")
 load("@python_version_repo//:py_version.bzl", "HERMETIC_PYTHON_VERSION", "HERMETIC_PYTHON_VERSION_KIND")
 load("@rocm_external_test_deps//:external_deps.bzl", "EXTERNAL_DEPS")
 load("@rocm_prebuilt_test_deps//:external_deps.bzl", PREBUILT_EXTERNAL_DEPS = "EXTERNAL_DEPS")
-load("@rules_python//python:defs.bzl", "py_library", "py_test")
+load("@rules_python//python:defs.bzl", _py_binary = "py_binary", _py_library = "py_library", _py_test = "py_test")
 load("@test_shard_count//:test_shard_count.bzl", "USE_MINIMAL_SHARD_COUNT")
 load("@xla//third_party/py:python_wheel.bzl", "collect_data_files", "transitive_py_deps")
 load("@xla//xla/tsl:tsl.bzl", "transitive_hdrs", _if_windows = "if_windows", _pybind_extension = "tsl_pybind_extension_opensource")
@@ -37,9 +40,11 @@ load("@xla//xla/tsl/platform:build_config_root.bzl", _tf_cuda_tests_tags = "tf_c
 cc_proto_library = _cc_proto_library
 cuda_library = _cuda_library
 rocm_library = _rocm_library
+oneapi_library = _oneapi_library
 proto_library = _proto_library
 if_cuda_is_configured = _if_cuda_is_configured
 if_rocm_is_configured = _if_rocm_is_configured
+if_oneapi_is_configured = _if_oneapi_is_configured
 if_windows = _if_windows
 flatbuffer_cc_library = _flatbuffer_cc_library
 tf_exec_properties = _tf_exec_properties
@@ -138,24 +143,33 @@ jax_extra_deps = []
 jax_gpu_support_deps = []
 jax2tf_deps = []
 
+def py_library(name, **kwargs):
+    kwargs.pop("strict_deps", None)
+    _py_library(name = name, **kwargs)
+
+def py_binary(name, **kwargs):
+    kwargs.pop("strict_deps", None)
+    _py_binary(name = name, **kwargs)
+
+def py_test(name, **kwargs):
+    kwargs.pop("strict_deps", None)
+    _py_test(name = name, **kwargs)
+
 def pytype_library(name, pytype_srcs = [], **kwargs):
     data = pytype_srcs + (kwargs["data"] if "data" in kwargs else [])
     new_kwargs = {k: v for k, v in kwargs.items() if k != "data"}
     new_kwargs.pop("lazy_imports", None)
     new_kwargs.pop("type_checking", None)
-    py_library(name = name, data = data, **new_kwargs)
+    _py_library(name = name, data = data, **new_kwargs)
 
 def pytype_strict_library(name, pytype_srcs = [], **kwargs):
     data = pytype_srcs + (kwargs["data"] if "data" in kwargs else [])
     new_kwargs = {k: v for k, v in kwargs.items() if k != "data"}
     new_kwargs.pop("lazy_imports", None)
     new_kwargs.pop("type_checking", None)
-    py_library(name = name, data = data, **new_kwargs)
+    _py_library(name = name, data = data, **new_kwargs)
 
-py_strict_library = py_library
-py_strict_test = py_test
-
-def py_library_providing_imports_info(*, name, lib_rule = py_library, pytype_srcs = [], **kwargs):
+def py_library_providing_imports_info(*, name, lib_rule = _py_library, pytype_srcs = [], **kwargs):
     data = pytype_srcs + (kwargs["data"] if "data" in kwargs else [])
     new_kwargs = {k: v for k, v in kwargs.items() if k != "data"}
     new_kwargs.pop("lazy_imports", None)
@@ -217,11 +231,10 @@ def _cpu_test_deps():
 def _gpu_test_deps():
     """Returns the additional dependencies needed for a GPU test."""
     return select({
-        "//jax:config_build_jaxlib_true": [
+        "//jax:config_build_jaxlib_true": if_cuda_is_configured([
             "//jaxlib/cuda:gpu_only_test_deps",
-            "//jaxlib/rocm:gpu_only_test_deps",
             "//jax_plugins:gpu_plugin_only_test_deps",
-        ],
+        ]) + if_rocm_is_configured(EXTERNAL_DEPS),
         "//jax:config_build_jaxlib_false": if_cuda_is_configured([
             "//jaxlib/tools:pypi_jax_cuda_plugin_with_cuda_deps",
             "//jaxlib/tools:pypi_jax_cuda_pjrt_with_cuda_deps",
@@ -323,7 +336,7 @@ def jax_multiplatform_test(
             test_tags += tf_cuda_tests_tags()
         elif backend == "tpu":
             test_deps += ["@pypi//libtpu"]
-        py_test(
+        _py_test(
             name = name + "_" + backend,
             srcs = srcs,
             args = test_args,
@@ -495,6 +508,11 @@ def _jax_wheel_impl(ctx):
         if ctx.attr.platform_version == "":
             fail("platform_version must be set to a valid rocm version for rocm wheels")
         args.add("--platform_version", ctx.attr.platform_version)  # required for gpu wheels
+    if ctx.attr.enable_oneapi:
+        args.add("--enable-oneapi", "True")
+        if ctx.attr.platform_version == "":
+            fail("platform_version must be set to a valid oneapi version for oneapi wheels")
+        args.add("--platform_version", ctx.attr.platform_version)  # required for gpu wheels
     if ctx.attr.skip_gpu_kernels:
         args.add("--skip_gpu_kernels")
 
@@ -536,11 +554,12 @@ _jax_wheel = rule(
         "source_files": attr.label_list(allow_files = True),
         "output_path": attr.label(default = Label("//jaxlib/tools:output_path")),
         "enable_cuda": attr.bool(default = False),
-        # A cuda/rocm version is required for gpu wheels; for cpu wheels, it can be an empty string.
+        # A cuda/rocm/oneapi version is required for gpu wheels; for cpu wheels, it can be an empty string.
         "platform_version": attr.string(),
         "skip_gpu_kernels": attr.bool(default = False),
         "enable_rocm": attr.bool(default = False),
         "reproducible": attr.bool(default = False),
+        "enable_oneapi": attr.bool(default = False),
         "include_cuda_libs": attr.label(default = Label("@local_config_cuda//cuda:include_cuda_libs")),
         "override_include_cuda_libs": attr.label(default = Label("@local_config_cuda//cuda:override_include_cuda_libs")),
         "py_freethreaded": attr.label(default = Label("@rules_python//python/config_settings:py_freethreaded")),
@@ -559,6 +578,7 @@ def jax_wheel(
         editable = False,
         enable_cuda = False,
         enable_rocm = False,
+        enable_oneapi = False,
         platform_version = "",
         reproducible = False,
         source_files = []):
@@ -575,6 +595,7 @@ def jax_wheel(
       platform_independent: whether to build a wheel without platform tag
       enable_cuda: whether to build a cuda wheel
       enable_rocm: whether to build a rocm wheel
+      enable_oneapi: whether to build a oneapi wheel
       platform_version: the cuda version to use for the wheel
       reproducible: whether to produce a reproducible wheel by fixing timestamps
       source_files: the source files to include in the wheel
@@ -593,6 +614,7 @@ def jax_wheel(
         editable = editable,
         enable_cuda = enable_cuda,
         enable_rocm = enable_rocm,
+        enable_oneapi = enable_oneapi,
         platform_version = platform_version,
         reproducible = reproducible,
         # git_hash is empty by default. Use `--//jaxlib/tools:jaxlib_git_hash=$(git rev-parse HEAD)`
@@ -679,14 +701,14 @@ def jax_py_test(
     deps = kwargs.get("deps", [])
     test_deps = _cpu_test_deps() + _get_jax_test_deps(deps)
     kwargs["deps"] = test_deps
-    py_test(name = name, env = env, **kwargs)
+    _py_test(name = name, env = env, **kwargs)
 
 def pytype_test(name, **kwargs):
     deps = kwargs.get("deps", [])
     test_deps = _cpu_test_deps() + _get_jax_test_deps(deps)
     kwargs["deps"] = test_deps
     kwargs.pop("type_checking", None)
-    py_test(name = name, **kwargs)
+    _py_test(name = name, **kwargs)
 
 def if_oss(oss_value, google_value = []):
     """Returns one of the arguments based on the non-configurable build env.

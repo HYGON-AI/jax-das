@@ -14,19 +14,19 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
 import functools
 import os
 import traceback
 import types
-from typing import Any, TypeVar, cast
+from typing import TypeVar, cast
 
 from jax._src import config
 from jax._src import util
 from jax._src.lib import _jax
 
 
-C = TypeVar("C", bound=Callable[..., Any])
+# TODO(slebedev): Add `bound=Callable` once facebook/pyrefly#3329 is fixed.
+C = TypeVar("C")
 
 _exclude_paths: list[str] = []
 
@@ -148,8 +148,7 @@ def _running_under_ipython() -> bool:
 
 def _ipython_supports_tracebackhide() -> bool:
   """Returns true if the IPython version supports __tracebackhide__."""
-  import IPython  # pytype: disable=import-error
-  # pyrefly: ignore[unsupported-operation]  # pyrefly#896
+  import IPython  # pyrefly: ignore[missing-import]
   return IPython.version_info[:2] >= (7, 17)
 
 def _filtering_mode() -> str:
@@ -189,11 +188,11 @@ def api_boundary(
   For the "repro" kwargs, see the comments for `repro.boundary`.
   '''
 
-  @functools.wraps(fun)
+  @functools.wraps(fun)  # pyrefly: ignore[bad-argument-type]
   def reraise_with_filtered_traceback(*args, **kwargs):
     __tracebackhide__ = True
     try:
-      return fun(*args, **kwargs)
+      return fun(*args, **kwargs)  # pyrefly: ignore[not-callable]
     except Exception as e:
       mode = _filtering_mode()
       if _is_under_reraiser(e) or mode == "off":
@@ -226,7 +225,7 @@ def api_boundary(
         raise
       finally:
         del mode, tb
-  if (repro_api_name or repro_user_func) and repro:
+  if repro and (repro_api_name or repro_user_func):
     reraise_with_filtered_traceback = repro.boundary(
         reraise_with_filtered_traceback, api_name=repro_api_name,
         is_user=repro_user_func)
@@ -236,7 +235,6 @@ try:
   # TODO: import from the final location
   from jax._src import repro  # pyrefly: ignore[missing-module-attribute]
   repro_is_enabled = repro.is_enabled
-
-except ImportError:
+except (ImportError, AttributeError):
   repro = None
-  def repro_is_enabled(): return False
+  repro_is_enabled = lambda: False

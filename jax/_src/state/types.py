@@ -20,7 +20,7 @@ import dataclasses
 import functools
 import math
 import operator
-from typing import Any, Protocol, Union
+from typing import Any, cast, Protocol, Union
 
 from jax._src import ad_util
 from jax._src import core
@@ -55,9 +55,9 @@ class RefEffect(effects.JaxprInputEffect):
 
   def _pretty_print(self, context: core.JaxprPpContext) -> pp.Doc:
     if isinstance(self.input_index, core.Var):
-      index_text = pp.text(core.pp_var(self.input_index, context))
+      index_text = core.pp_var(self.input_index, context)
     else:
-      index_text = pp.text(self.input_index)
+      index_text = pp.text(str(self.input_index))
     return pp.concat([
       pp.color(pp.text(self.name), foreground=_ref_effect_color),
       pp.text("<"),
@@ -100,6 +100,17 @@ class Transform(Protocol):
     return pp.text(f"{{{self}}}")
 
 
+class MultiRefTransform(Transform):
+
+  def transform_types(
+      self, xs: Sequence[core.AbstractValue]
+  ) -> core.AbstractValue:
+    raise NotImplementedError(type(self))
+
+  def getattr(self, name: str, xs: Sequence[core.AbstractValue]) -> Any:
+    raise NotImplementedError(type(self), name)
+
+
 @tree_util.register_dataclass
 @dataclasses.dataclass(frozen=True)
 class BitcastTransform(Transform):
@@ -110,7 +121,7 @@ class BitcastTransform(Transform):
       case AbstractRef():
         return x.update(inner_aval=self.transform_type(x.inner_aval))
       case core.ShapedArray():
-        from jax._src.state.utils import eval_bitcast_shape  # pytype: disable=import-error
+        from jax._src.state.utils import eval_bitcast_shape  # pyrefly: ignore[missing-import]
 
         new_shape = eval_bitcast_shape(x, self.dtype)
         if not all(p is None for p in x.sharding.spec):
@@ -220,6 +231,41 @@ class TransposeTransform(Transform):
     return pp.text(f"{{transpose({list(self.permutation)})}}")
 
 
+@tree_util.register_dataclass
+@dataclasses.dataclass(frozen=True)
+class SelectTransform(MultiRefTransform):
+  idx: Array | int = dataclasses.field(metadata=dict(static=False))
+
+  def transform_types(self, xs):
+    def _type(ref):
+      match ref:
+        case AbstractRef():
+          return ref
+        case core.ShapedArray():
+          raise NotImplementedError
+        case _:
+          raise TypeError(f"Cannot select {ref}")
+
+    assert isinstance(xs, Sequence), f"Select expected sequence, got {xs}"
+    types = tuple(_type(ref) for ref in xs)
+    if any(types[0] != t for t in types[1:]):
+      raise TypeError(f"Cannot select from Refs of different types: {types}")
+    return types[0]
+
+  def undo(self, x: core.AbstractValue) -> Transform:
+    raise NotImplementedError(type(self))
+
+  def pretty_print(self, context: core.JaxprPpContext) -> pp.Doc:
+    del context  # Unused.
+    return pp.text(f"{{select({self.idx=})}}")
+
+  def getattr(self, name: str, xs: Sequence[core.AbstractValue]) -> Any:
+    attrs = [getattr(x, name) for x in xs]
+    if any(attrs[0] != attr for attr in attrs[1:]):
+      raise TypeError(f"Cannot resolve attribute {name} from: {attrs}")
+    return attrs[0]
+
+
 @dataclasses.dataclass
 class RefIndexer:
   """An object temporarily generated when doing ``ref.at``."""
@@ -228,9 +274,12 @@ class RefIndexer:
   def __getitem__(self, slc) -> TransformedRef:
     if not isinstance(slc, tuple):
       slc = (slc,)
-    from jax._src.state import indexing  # pytype: disable=import-error
+    from jax._src.state import indexing
     indexer = indexing.NDIndexer.from_indices_shape(slc, self.ref_or_view.shape)
-    if isinstance(self.ref_or_view, TransformedRef):
+    if (
+        isinstance(self.ref_or_view, TransformedRef)
+        and not self.ref_or_view.multiref
+    ):
       view = self.ref_or_view
       return TransformedRef(view.ref, (*view.transforms, indexer))
     return TransformedRef(self.ref_or_view, (indexer,))
@@ -241,16 +290,40 @@ class TransformedRef:
   ref: Any
   transforms: tuple[Transform, ...]
 
+  def __post_init__(self):
+    if self.multiref and len(self.transforms) != 1:
+      raise ValueError(
+          f"Multi-ref TransformedRef requires a single transform: {self}"
+      )
+    if any(isinstance(t, MultiRefTransform) for t in self.transforms):
+      assert self.multiref and len(self.transforms) == 1
+
+  @property
+  def multiref(self) -> bool:
+    if isinstance(self.ref, Sequence):
+      if all(isinstance(x, int) for x in self.ref):
+        return False  # self.ref is an array's shape. This happens in lowering.
+      return True
+    return False
+
   @property
   def is_dynamic_size(self):
     return any(not isinstance(i, int) for i in self.shape)
 
   @functools.cached_property
   def type(self) -> core.AbstractValue:
-    if type(self.ref) in core.pytype_aval_mappings:
-      ref_ty = core.typeof(self.ref)
-    else:
-      ref_ty = self.ref
+    def _type(ref):
+      if isinstance(ref, TransformedRef):
+        return ref.type
+      elif type(ref) in core.pytype_aval_mappings:
+        return core.typeof(ref)
+      else:
+        return ref
+
+    if self.multiref:
+      ref_ty = tuple(_type(r) for r in self.ref)
+      return cast(MultiRefTransform, self.transforms[0]).transform_types(ref_ty)
+    ref_ty = _type(self.ref)
     for t in self.transforms:
       ref_ty = t.transform_type(ref_ty)
     return ref_ty
@@ -281,6 +354,8 @@ class TransformedRef:
           "Bitcast ref with dynamic size is not supported."
       )
     dtype = dtypes.dtype(dtype)
+    if self.multiref:
+      return TransformedRef(self, (BitcastTransform(dtype),))
     return TransformedRef(self.ref, (*self.transforms, BitcastTransform(dtype)))
 
   def reshape(self, *shape):
@@ -292,33 +367,41 @@ class TransformedRef:
       shape = shape[0]
     input_shape = tuple(operator.index(s) for s in self.shape)
     shape = _canonicalize_reshape(input_shape, shape)
+    if self.multiref:
+      return TransformedRef(self, (ReshapeTransform(shape),))
     return TransformedRef(self.ref, (*self.transforms, ReshapeTransform(shape)))
 
   def transpose(self, permutation: Sequence[int]):
+    if self.multiref:
+      raise NotImplementedError("Transpose with multiref is not supported.")
     transposer = TransposeTransform(tuple(permutation))
+    if self.multiref:
+      return TransformedRef(self, (transposer,))
     return TransformedRef(self.ref, (*self.transforms, transposer))
 
   def set(self, value, idx=()):
-    from jax._src.state.primitives import ref_set  # pytype: disable=import-error
+    from jax._src.state.primitives import ref_set  # pyrefly: ignore[missing-import]
     return ref_set(self, idx, value)
 
   def swap(self, value, idx=()):
-    from jax._src.state.primitives import ref_swap  # pytype: disable=import-error
+    from jax._src.state.primitives import ref_swap  # pyrefly: ignore[missing-import]
     return ref_swap(self, idx, value)
 
   def get(self, idx=()):
-    from jax._src.state.primitives import ref_get  # pytype: disable=import-error
+    from jax._src.state.primitives import ref_get  # pyrefly: ignore[missing-import]
     return ref_get(self, idx)
 
   def __getattr__(self, name):
+    if self.multiref:
+      return cast(MultiRefTransform, self.transforms[0]).getattr(name, self.ref)
     return getattr(self.ref, name)
 
   def __getitem__(self, slc):
-    from jax._src.state.primitives import ref_get  # pytype: disable=import-error
+    from jax._src.state.primitives import ref_get  # pyrefly: ignore[missing-import]
     return ref_get(self, slc)
 
   def __setitem__(self, slc, value):
-    from jax._src.state.primitives import ref_set  # pytype: disable=import-error
+    from jax._src.state.primitives import ref_set  # pyrefly: ignore[missing-import]
     return ref_set(self, slc, value)
 
 class TransformedRefAvalError(Exception):
@@ -360,6 +443,19 @@ class AbstractRef(core.AbstractValue):
   def __init__(self, inner_aval: core.AbstractValue, memory_space: Any = None,
                kind: Any = None):
     self.inner_aval = inner_aval
+    # TODO(sharadmv,mattjj,yashkatariya): merge memory spaces
+    if isinstance(inner_aval, core.ShapedArray):
+      if (
+          inner_aval.memory_space is not None
+          and inner_aval.memory_space != core.MemorySpace.Device
+          and inner_aval.memory_space != memory_space
+      ):
+        raise ValueError(
+            f"Aval memory space {inner_aval.memory_space} does not match the "
+            f"requested memory space {memory_space}."
+        )
+      # Hide the inner_aval memory space.
+      self.inner_aval = inner_aval.update(memory_space=core.MemorySpace.Device)
     self.memory_space = memory_space
     self.kind = kind
 
@@ -474,37 +570,37 @@ class AbstractRef(core.AbstractValue):
   @core.aval_method
   @staticmethod
   def get(tracer, idx=()):
-    from jax._src.state.primitives import ref_get  # pytype: disable=import-error
+    from jax._src.state.primitives import ref_get  # pyrefly: ignore[missing-import]
     return ref_get(tracer, idx)
 
   @core.aval_method
   @staticmethod
   def swap(tracer, value, idx=()):
-    from jax._src.state.primitives import ref_swap  # pytype: disable=import-error
+    from jax._src.state.primitives import ref_swap  # pyrefly: ignore[missing-import]
     return ref_swap(tracer, idx, value)
 
   @core.aval_method
   @staticmethod
   def set(tracer, value, idx=()):
-    from jax._src.state.primitives import ref_set  # pytype: disable=import-error
+    from jax._src.state.primitives import ref_set  # pyrefly: ignore[missing-import]
     return ref_set(tracer, idx, value)
 
   @core.aval_method
   @staticmethod
   def addupdate(tracer, value, idx=()):
-    from jax._src.state.primitives import ref_addupdate  # pytype: disable=import-error
+    from jax._src.state.primitives import ref_addupdate  # pyrefly: ignore[missing-import]
     ref_addupdate(tracer, idx, value)
 
   def _getitem(self, tracer, idx) -> Array:
-    from jax._src.state.primitives import ref_get  # pytype: disable=import-error
+    from jax._src.state.primitives import ref_get  # pyrefly: ignore[missing-import]
     return ref_get(tracer, idx)
 
   def _setitem(self, tracer, idx, value) -> None:
-    from jax._src.state.primitives import ref_set  # pytype: disable=import-error
+    from jax._src.state.primitives import ref_set  # pyrefly: ignore[missing-import]
     return ref_set(tracer, idx, value)
 
   def _addupdate(self, tracer, idx, value):
-    from jax._src.state.primitives import ref_addupdate  # pytype: disable=import-error
+    from jax._src.state.primitives import ref_addupdate  # pyrefly: ignore[missing-import]
     ref_addupdate(tracer, idx, value)
 
   def str_short(self, short_dtypes=False, mesh_axis_types=False) -> str:
@@ -609,3 +705,6 @@ class AbstractLinVal(core.AbstractValue):
   shape = property(lambda self: self.inner_aval.shape)
   dtype = property(lambda self: self.inner_aval.dtype)
   ndim = property(lambda self: self.inner_aval.ndim)
+
+  def raise_val(self, val): return val
+  def lower_val(self, val): return [val]

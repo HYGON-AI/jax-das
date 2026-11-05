@@ -15,7 +15,8 @@ from __future__ import annotations
 
 from collections.abc import Hashable
 from functools import partial
-from typing import Any, Callable, NamedTuple, Sequence, Iterable
+from typing import Any, NamedTuple
+from collections.abc import Callable, Sequence, Iterable
 import warnings
 
 from jax._src import api
@@ -792,7 +793,7 @@ def host_local_array_to_global_array(
     Converted global arrays.
   """
   if not trace_state_clean:
-    import jax.experimental.multihost_utils as mhu  # pytype: disable=import-error
+    import jax.experimental.multihost_utils as mhu  # pyrefly: ignore[missing-import]
 
     return list(
         mhu.host_local_array_to_global_array(
@@ -877,7 +878,7 @@ def global_array_to_host_local_array(out, cached, trace_state_clean):
     Host-local output pytree.
   """
   if not trace_state_clean:
-    import jax.experimental.multihost_utils as mhu  # pytype: disable=import-error
+    import jax.experimental.multihost_utils as mhu  # pyrefly: ignore[missing-import]
 
     return mhu.global_array_to_host_local_array(
         out, cached.mesh, cached.out_specs

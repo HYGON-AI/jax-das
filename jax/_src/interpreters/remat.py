@@ -15,7 +15,7 @@
 from __future__ import annotations
 
 from functools import partial
-from typing import Callable
+from collections.abc import Callable
 
 from jax._src import core
 from jax._src import api_util
@@ -81,6 +81,11 @@ class RematTrace(core.Trace):
       return x.val, x.tracer
     else:
       return x, x
+
+  def stage_value(self, val):
+    new_val = self.parent_trace.stage_value(val)
+    new_tracer = self.jaxpr_trace.stage_value(val)
+    return RematTracer(self, new_val, new_tracer)
 
   def process_primitive(self, prim, tracers, params, /):
     in_vals, in_vals2 = unzip2(map(self.to_val_tracer_pair, tracers))

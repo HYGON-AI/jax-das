@@ -181,7 +181,7 @@ def odeint(func, y0, t, *args, rtol=1.4e-8, atol=1.4e-8, mxstep=jnp.inf, hmax=jn
   converted, consts = custom_derivatives.closure_convert(func, y0, t[0], *args)
   return _odeint_wrapper(converted, rtol, atol, mxstep, hmax, y0, t, *args, *consts)
 
-@partial(jax.jit, static_argnums=(0, 1, 2, 3, 4))
+@jax.jit(static_argnums=(0, 1, 2, 3, 4))
 def _odeint_wrapper(func: Callable, rtol, atol, mxstep, hmax, y0, ts, *args):
   y0, unravel = ravel_pytree(y0)
   debug = api_util.debug_info("odeint", func, args, {})

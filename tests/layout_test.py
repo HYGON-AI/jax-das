@@ -13,7 +13,6 @@
 # limitations under the License.
 
 import math
-from functools import partial
 
 from absl.testing import absltest
 from absl.testing import parameterized
@@ -481,7 +480,7 @@ class LayoutTest(jtu.JaxTestCase):
 
     custom_dll = Layout(major_to_minor=(0, 1))
 
-    @partial(jax.jit,
+    @jax.jit(
              in_shardings=Format(custom_dll, s),
              out_shardings=Format(Layout.AUTO))
     def f(x):

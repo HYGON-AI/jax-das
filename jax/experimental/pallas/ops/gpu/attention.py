@@ -651,7 +651,7 @@ def _mha_backward(sm_scale: float, causal: bool, block_sizes: BlockSizes,
 mha.defvjp(_mha_forward, _mha_backward)
 
 
-@functools.partial(jax.jit, static_argnames=['sm_scale', 'causal'])
+@jax.jit(static_argnames=['sm_scale', 'causal'])
 def mha_reference(
     q,
     k,

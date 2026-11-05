@@ -14,8 +14,7 @@
 
 # Package for Mosaic-specific Pallas extensions
 
-load("@rules_python//python:defs.bzl", "py_library")
-load("//jaxlib:jax.bzl", "py_deps", "pytype_strict_library")
+load("//jaxlib:jax.bzl", "py_deps", "py_library", "pytype_strict_library")
 
 package(
     default_applicable_licenses = [],
@@ -55,6 +54,7 @@ py_library(
 py_library(
     name = "primitives",
     srcs = ["primitives.py"],
+    strict_deps = False,
     deps = [
         ":core",
         "//jax",
@@ -72,6 +72,7 @@ py_library(
 py_library(
     name = "pallas_call_registration",
     srcs = ["pallas_call_registration.py"],
+    strict_deps = False,
     deps = [
         ":core",
         ":lowering",
@@ -141,16 +142,10 @@ pytype_strict_library(
         ":lowering",
         ":primitives",
         ":sc_core",
-        ":tpu_info",
-        "//jax/_src:api_util",
         "//jax/_src:core",
         "//jax/_src:debugging",
         "//jax/_src:lax",
-        "//jax/_src:mesh",
-        "//jax/_src:mlir",
         "//jax/_src:numpy",
-        "//jax/_src:partial_eval",
-        "//jax/_src:source_info_util",
         "//jax/_src:tree_util",
         "//jax/_src:util",
         "//jax/_src/lib",
@@ -171,10 +166,7 @@ pytype_strict_library(
         ":tpu_info",
         "//jax",
         "//jax/_src:core",
-        "//jax/_src:lax",
-        "//jax/_src:partial_eval",
         "//jax/_src:tree_util",
-        "//jax/_src:util",
         "//jax/_src/pallas",
     ],
 )
@@ -206,6 +198,7 @@ pytype_strict_library(
 py_library(
     name = "pipeline",
     srcs = ["pipeline.py"],
+    strict_deps = False,
     deps = [
         ":core",
         ":primitives",
@@ -222,6 +215,7 @@ py_library(
 py_library(
     name = "random",
     srcs = ["random.py"],
+    strict_deps = False,
     deps = [
         ":primitives",
         "//jax",

@@ -18,7 +18,8 @@ from dataclasses import dataclass
 from functools import partial, update_wrapper
 import inspect
 import itertools as it
-from typing import Any, Hashable, Callable
+from typing import Any
+from collections.abc import Hashable, Callable
 
 from jax._src import api
 from jax._src import config
@@ -32,6 +33,7 @@ from jax._src.interpreters import ad
 from jax._src.interpreters import batching
 from jax._src.interpreters import partial_eval as pe
 from jax._src.interpreters import remat
+from jax._src.partition_spec import PartitionSpec
 from jax._src.custom_derivatives import (
     CustomVJPPrimal, _temporary_dtype_exception, _check_for_returned_refs)
 from jax._src.errors import UnexpectedTracerError
@@ -271,7 +273,7 @@ class _BoxMeta(type):
             isinstance(core.typeof(instance), BoxTy))
 
 class Box(metaclass=_BoxMeta):  # noqa: F811
-  _val = None  # always clobbered by __new__, but pytype likes this
+  _val: Any
 
   # We want `Box(x)` to bind a primitive, so we override __new__ and provide a
   # raw `_new` method below.
@@ -904,7 +906,7 @@ class Static:
 
 class MappingSpec: pass
 class HiPspec:
-  def to_lo(self) -> HiPspec: assert False, "must override"
+  def to_lo(self) -> tuple[PartitionSpec, ...]: assert False, "must override"
   def to_tangent_spec(self) -> HiPspec: assert False, "must override"
   def to_ct_spec(self) -> HiPspec: assert False, "must override"
 
@@ -962,6 +964,9 @@ class LogTy(MutableHiType):
 
   def to_tangent_aval(self):
     return LogTy()
+
+  def lo_ty_qdd(self, qdd: QDD, /) -> list[core.AbstractValue]:
+    return []
 
   def read_loval_in(self, qdd, log):
     () = qdd

@@ -39,10 +39,10 @@ from jax._src import effects
 from jax._src import mesh as mesh_lib
 from jax._src.interpreters import mlir
 from jax._src.interpreters import pxla
-from jax._src.lax import linalg  # pyrefly: ignore[missing-import]
-from jax._src.lib import jaxlib_extension_version
+from jax._src.lax import linalg
 from jax._src.lib import xla_client
 from jax._src.lib import _jax
+from jax._src.lib import jaxlib_extension_version
 from jax._src.lib.mlir import ir, passmanager
 from jax._src.lib.mlir.dialects import hlo
 from jax._src.lib.mlir.dialects import func as func_dialect, sdy
@@ -230,19 +230,12 @@ class Exported:
 
   def mlir_module(self, serialized: bool = True) -> Any:
     """A string or Module representation of the ``mlir_module_serialized``."""
-    if jaxlib_extension_version >= 437:
-      if serialized:
-        with mlir.make_ir_context():
-          module = _jax.mlir.deserialize_portable_artifact(self.mlir_module_serialized)
-          return mlir.module_to_string(module)
-      else:
-        return _jax.mlir.deserialize_portable_artifact(self.mlir_module_serialized)
+    if serialized:
+      with mlir.make_ir_context():
+        module = _jax.mlir.deserialize_portable_artifact(self.mlir_module_serialized)
+        return mlir.module_to_string(module)
     else:
-      module = _jax.mlir.deserialize_portable_artifact(self.mlir_module_serialized)
-      if serialized:
-        return module
-      else:
-        return ir.Module.parse(module)
+      return _jax.mlir.deserialize_portable_artifact(self.mlir_module_serialized)
 
   def __str__(self):
     # This is called to make a MLIR source location when we call an Exported, and we
@@ -903,7 +896,6 @@ def _export_lowered(
       _get_vjp=_get_exported_vjp)
 
 def _module_to_bytecode(module: ir.Module) -> bytes:
-  mlir_str = mlir.module_to_bytecode(module)
   # `target_version` is used to manage situations when a StableHLO producer
   # and a StableHLO consumer were built using different versions of StableHLO.
   #
@@ -924,8 +916,14 @@ def _module_to_bytecode(module: ir.Module) -> bytes:
   # StableHLO features from failing on older hardware.
   target_version = hlo.get_version_from_compatibility_requirement(
     hlo.StablehloCompatibilityRequirement.WEEK_4)
-  module_serialized = _jax.mlir.serialize_portable_artifact(
-      mlir_str, target_version, xb.get_backend().serialize_with_sdy)
+
+  if jaxlib_extension_version >= 440:
+    module_serialized = _jax.mlir.serialize_portable_artifact(
+        module, target_version, xb.get_backend().serialize_with_sdy)
+  else:
+    mlir_str = mlir.module_to_bytecode(module)
+    module_serialized = _jax.mlir.serialize_portable_artifact(
+        mlir_str, target_version, xb.get_backend().serialize_with_sdy)
   return module_serialized
 
 
@@ -1629,8 +1627,6 @@ def _call_exported_lowering(ctx: mlir.LoweringRuleContext, *args,
     num_devices = axis_context.num_devices
   elif isinstance(axis_context, sharding_impls.SPMDAxisContext):
     num_devices = axis_context.mesh.size
-  elif isinstance(axis_context, sharding_impls.ReplicaAxisContext):
-    num_devices = axis_context.axis_env.nreps
   else:
     raise NotImplementedError(type(axis_context))
   if num_devices != exported.nr_devices and exported.nr_devices != 1:
@@ -1673,7 +1669,7 @@ def _call_exported_lowering(ctx: mlir.LoweringRuleContext, *args,
   # is valid.
   def convert_shape(x: ir.Value, x_aval: core.AbstractValue,
                     new_aval: core.AbstractValue) -> ir.Value:
-    new_ir_type = mlir.aval_to_ir_type(new_aval)
+    new_ir_type = mlir.aval_to_ir_type(ctx.module_context, new_aval)
     if x.type != new_ir_type:
       return hlo.convert(new_ir_type, x)
     else:
@@ -1712,7 +1708,7 @@ def _call_exported_lowering(ctx: mlir.LoweringRuleContext, *args,
     else:
       current_platform_idx = cast(ir.Value, mlir.ir_constant(np.int32(0)))
     # Compute the rule index based on the current platform
-    i32_type = mlir.aval_to_ir_type(core.ShapedArray((), dtype=np.int32))
+    i32_type = mlir.aval_to_ir_type(ctx.module_context, core.ShapedArray((), dtype=np.int32))
     if current_platform_idx.type != i32_type:
       current_platform_idx = hlo.convert(i32_type, current_platform_idx)
     callee_platform_idx = hlo.CaseOp([i32_type],

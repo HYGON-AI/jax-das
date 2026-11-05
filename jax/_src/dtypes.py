@@ -25,7 +25,8 @@ import abc
 import dataclasses
 import functools
 import types
-from typing import cast, overload, Any, Callable, Literal, Union
+from typing import cast, overload, Any, Literal, Union
+from collections.abc import Callable
 import warnings
 
 import ml_dtypes
@@ -384,7 +385,7 @@ def canonicalize_value(x):
     handler = canonicalize_value_handlers.get(typ)
     if handler:
       return handler(x)
-  if hasattr(x, '__jax_array__'):
+  if getattr(x, '__jax_array__', None) is not None:
     raise ValueError(
         'Triggering __jax_array__() during abstractification is no longer'
         ' supported. To avoid this error, either explicitly convert your object'
@@ -764,8 +765,12 @@ _standard_x64_lattice_ubs = _make_lattice_upper_bounds(strict=False, x64=True)
 _standard_x32_lattice_ubs = _make_lattice_upper_bounds(strict=False, x64=False)
 _strict_lattice_ubs = _make_lattice_upper_bounds(strict=True, x64=True)
 
+
+@export
 class TypePromotionError(ValueError):
+  """Raised when JAX type promotion fails."""
   pass
+
 
 # We don't use util.memoize because there is no implicit X64 dependence.
 @functools.lru_cache(512)
@@ -921,7 +926,7 @@ def is_weakly_typed(x: Any) -> bool:
   except AttributeError:
     return False
 
-def is_python_scalar(x: Any) -> bool:
+def is_weakly_typed_scalar(x: Any) -> bool:
   try:
     return x.aval.weak_type and np.ndim(x) == 0
   except AttributeError:

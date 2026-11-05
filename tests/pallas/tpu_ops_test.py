@@ -1067,22 +1067,11 @@ class OpsTest(ptu.PallasTPUTest):
   def test_1d_concatenate(self, dtype, shapes_and_out):
     packing = 32 // jnp.iinfo(dtype).bits
     x_shape, y_shape, out_shape = shapes_and_out
-    data_is_aligned = (
-        x_shape % (packing * 128) == 0 and y_shape % (packing * 128) == 0
-    )
 
     if packing >= 4:
-      if not jtu.is_cloud_tpu_at_least(2026, 4, 8):
-        self.skipTest("Requires newer libtpu")
       if not jtu.is_device_tpu_at_least(version=5):
         self.skipTest("Requires TPU v5+")
     if packing >= 2:
-      if (
-          not data_is_aligned
-          and not jtu.is_device_tpu_at_least(version=6)
-          and not jtu.is_cloud_tpu_at_least(2026, 4, 6)
-      ):
-        self.skipTest("Requires newer libtpu")
       if not jtu.is_device_tpu_at_least(version=4):
         self.skipTest("Requires TPU v4+")
 
@@ -1113,6 +1102,40 @@ class OpsTest(ptu.PallasTPUTest):
     np.testing.assert_array_equal(
         kernel(x, y),
         jnp.concatenate([x, y], axis=0),
+    )
+
+  def test_fuse_transposed_lhs_in_matmul(self):
+    if not jtu.is_cloud_tpu_at_least(year=2026, month=5, day=5):
+      self.skipTest("Requires newer libtpu")
+
+    lhs_shape = (512, 128)
+    rhs_shape = (512, 256)
+
+    def kernel(lhs_ref, rhs_ref, o_ref):
+      o_ref[...] = jnp.einsum("km,kn->mn", lhs_ref[...], rhs_ref[...])
+
+    lhs_key, rhs_key = jax.random.split(jax.random.key(42), 2)
+    lhs = (
+        jax.random.normal(lhs_key, lhs_shape, dtype=jnp.float32)
+        .astype(jnp.bfloat16)
+        .astype(jnp.float32)
+    )
+    rhs = (
+        jax.random.normal(rhs_key, rhs_shape, dtype=jnp.float32)
+        .astype(jnp.bfloat16)
+        .astype(jnp.float32)
+    )
+    result = self.pallas_call(
+        kernel,
+        out_shape=jax.ShapeDtypeStruct(
+            (lhs_shape[1], rhs_shape[1]), jnp.float32
+        ),
+        compiler_params=pltpu.CompilerParams(
+            fuse_transposed_lhs_in_matmul=True
+        ),
+    )(lhs, rhs)
+    np.testing.assert_allclose(
+        result, jnp.einsum("km,kn->mn", lhs, rhs), atol=1e-5
     )
 
 

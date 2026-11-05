@@ -28,7 +28,7 @@ from jax._src import dispatch
 from jax._src import dtypes
 from jax._src import lax
 from jax._src import numpy as jnp
-from jax._src.numpy.ufuncs import isposinf, isneginf, sinc
+from jax._src.numpy.ufuncs import arctan, isposinf, isneginf, sinc
 from jax._src.api import jit, jvp, vmap
 from jax._src.lax.lax import _const as _lax_const
 from jax._src.numpy import einsum as jnp_einsum
@@ -519,6 +519,7 @@ def erf(x: ArrayLike) -> Array:
 
   See also:
     - :func:`jax.scipy.special.erfc`
+    - :func:`jax.scipy.special.erfcx`
     - :func:`jax.scipy.special.erfinv`
   """
   x, = promote_args_inexact("erf", x)
@@ -548,6 +549,7 @@ def erfc(x: ArrayLike) -> Array:
 
   See also:
     - :func:`jax.scipy.special.erf`
+    - :func:`jax.scipy.special.erfcx`
     - :func:`jax.scipy.special.erfinv`
   """
   x, = promote_args_inexact("erfc", x)
@@ -576,6 +578,71 @@ def erfinv(x: ArrayLike) -> Array:
   """
   x, = promote_args_inexact("erfinv", x)
   return lax.erf_inv(x)
+
+
+def erfcx(x: ArrayLike) -> Array:
+  r"""Scaled complementary error function.
+
+  JAX implementation of :obj:`scipy.special.erfcx`.
+
+  .. math::
+
+     \mathrm{erfcx}(x) = e^{x^2} \mathrm{erfc}(x)
+
+  This is numerically stable for large positive ``x``, unlike the naive
+  formula which overflows.
+
+  Args:
+    x: arraylike, real-valued.
+
+  Returns:
+    array containing values of the scaled complementary error function.
+
+  See also:
+    - :func:`jax.scipy.special.erfc`
+    - :func:`jax.scipy.special.erf`
+  """
+  x, = promote_args_inexact("erfcx", x)
+  if dtypes.issubdtype(x.dtype, np.complexfloating):
+    raise ValueError("erfcx does not support complex-valued inputs.")
+  return _erfcx(x)
+
+
+@custom_derivatives.custom_jvp
+def _erfcx(x: Array) -> Array:
+  if x.dtype == np.float64:
+    # At threshold ~26.6, first omitted term |c_9|/x^18 ~ 1e-21 << eps64 ~ 2e-16.
+    return _erfcx_impl(x, nterms=9)
+  elif x.dtype == np.float32:
+    # At threshold ~9.4, first omitted term |c_5|/x^10 ~ 5e-9 << eps32 ~ 1e-7.
+    return _erfcx_impl(x, nterms=5)
+  else:  # float16, bfloat16 — upcast to float32
+    return _erfcx_impl(x.astype(np.float32), nterms=5).astype(x.dtype)
+
+_erfcx.defjvps(
+    lambda g, ans, x: g * (2 * x * ans - _lax_const(x, 2. / np.sqrt(np.pi))))
+
+
+def _erfcx_asymptotic(x: Array, nterms: int) -> Array:
+  # Asymptotic expansion: erfcx(x) ~ (1/(sqrt(pi)*x)) * P(1/x^2)
+  # P(t) = sum_{k=0}^{N} c_k * t^k,  c_k = (-1)^k * (2k-1)!! / 2^k
+  # Coefficients in descending order of degree (k=8..0) for jnp.polyval.
+  _coeffs = [7918.06640625, -1055.7421875, 162.421875, -29.53125, 6.5625,
+             -1.875, .75, -.5, 1.]
+  t = _lax_const(x, 1.) / lax.square(x)
+  p = jnp.polyval(np.array(_coeffs[-nterms:], dtype=x.dtype), t)
+  return p / (x * _lax_const(x, np.sqrt(np.pi)))
+
+
+def _erfcx_impl(x: Array, nterms: int) -> Array:
+  # Switch to asymptotic expansion when exp(x^2) would overflow.
+  # Overflow occurs when x^2 > log(fmax), i.e. x > sqrt(log(fmax)).
+  threshold = np.sqrt(np.log(dtypes.finfo(x.dtype).max))
+  large = x > _lax_const(x, threshold)
+  safe_x = lax.select(large, lax.full_like(x, 1.), x)
+  direct = lax.exp(lax.square(safe_x)) * lax.erfc(safe_x)
+  asymp = _erfcx_asymptotic(x, nterms)
+  return lax.select(large, asymp, direct)
 
 
 @custom_derivatives.custom_jvp
@@ -3336,6 +3403,124 @@ hyp2f1.defjvps(
   lambda c_dot, primal_out, a, b, c, x: _hyp2f1_c_derivative(a, b, c, x) * c_dot,
   lambda x_dot, primal_out, a, b, c, x: _hyp2f1_x_derivative(a, b, c, x) * x_dot
 )
+
+
+# 13-point Gauss-type quadrature on the canonical Owen's T integral
+#   T(h, a) = (1/2π) ∫_0^a exp(-h²(1+u²)/2) / (1+u²) du,
+# under the substitution u² = a²·t, which absorbs the 1/(2π) factor and
+# the Jacobian into the tabulated weights so that
+#   T(h, a) ≈ a · Σ_i w_i · exp(-h²(1+a²·t_i)/2) / (1+a²·t_i).
+# Patefield & Tandy (2000) Method T5: https://www.jstatsoft.org/v05/i05/paper
+_OWENS_T_QUAD_PTS = np.array([
+    0.0035082039676451715, 0.031279042338030754,
+    0.085266826283219451,  0.16245071730812277,
+    0.25851196049125435,   0.36807553840697534,
+    0.48501092905604697,   0.60277514152618577,
+    0.71477884217753227,   0.81475510988760099,
+    0.89711029755948966,   0.95723808085944262,
+    0.99178832974629704,
+])
+
+_OWENS_T_QUAD_WTS = np.array([
+    0.018831438115323503, 0.018567086243977649,
+    0.018042093461223386, 0.017263829606398753,
+    0.016243219975989857, 0.014994592034116705,
+    0.013535474469662088, 0.011886351605820165,
+    0.010070377242777432, 0.0081130545742299587,
+    0.0060419009528470239, 0.0038862217010742058,
+    0.0016793031084546090,
+])
+
+
+def _owens_t_quadrature(h, a):
+  quad_pts = jnp.expand_dims(_OWENS_T_QUAD_PTS, tuple(range(a.ndim)))
+  r = jnp.square(a)[..., None] * quad_pts
+  integrand = jnp.exp(-0.5 * jnp.square(h)[..., None] * (1. + r)) / (1. + r)
+  return a * (integrand @ _OWENS_T_QUAD_WTS)
+
+
+@custom_derivatives.custom_jvp
+def _owens_t_impl(h, a):
+  h = jnp.abs(h)
+  abs_a = jnp.abs(a)
+  root_2 = _lax_const(h, np.sqrt(2))
+  h_normed = h / root_2
+
+  modified_a = jnp.where(abs_a <= 1., abs_a, jnp.reciprocal(abs_a))
+  modified_h = jnp.where(abs_a <= 1., h, abs_a * h)
+
+  result = _owens_t_quadrature(modified_h, modified_a)
+
+  # Exact values for h=0 and a=1
+  result = jnp.where(modified_h == 0., arctan(modified_a) / (2 * np.pi), result)
+  result = jnp.where(
+      modified_a == 1.,
+      0.125 * lax.erfc(-modified_h / root_2) * lax.erfc(modified_h / root_2),
+      result)
+
+  # Reciprocal correction for |a| > 1
+  normh = lax.erfc(h_normed)
+  normah = lax.erfc(abs_a * h_normed)
+  result = jnp.where(
+      abs_a > 1.,
+      jnp.where(
+          abs_a * h <= 0.67,
+          (0.25 - 0.25 * lax.erf(h_normed) * lax.erf(abs_a * h_normed)
+           - result),
+          0.25 * (normh + normah - normh * normah) - result),
+      result)
+
+  result = lax.sign(a) * result
+  return jnp.where(jnp.isnan(a) | jnp.isnan(h), jnp.full_like(result, jnp.nan), result)
+
+
+def _owens_t_jvp(primals, tangents):
+  (h, a) = primals
+  (dh, da) = tangents
+  result = _owens_t_impl(h, a)
+  root_2 = _lax_const(h, np.sqrt(2))
+  # ∂T/∂h = -exp(-h²/2) · erf(ah/√2) / (2√(2π))
+  dout_dh = (-lax.exp(-0.5 * lax.square(h)) * lax.erf(a * h / root_2)
+             / (2. * _lax_const(h, np.sqrt(2. * np.pi))))
+  # ∂T/∂a = exp(-½(a²+1)h²) / (2π(a²+1))
+  dout_da = (lax.exp(-0.5 * (lax.square(a) + 1.) * lax.square(h))
+             / (2. * np.pi * (lax.square(a) + 1.)))
+  return result, (dout_dh * dh + dout_da * da).astype(result.dtype)
+
+_owens_t_impl.defjvp(_owens_t_jvp)
+
+
+def owens_t(h: ArrayLike, a: ArrayLike) -> Array:
+  r"""Owen's T function.
+
+  JAX implementation of :obj:`scipy.special.owens_t`.
+
+  Computes Owen's T function:
+
+  .. math::
+
+     T(h, a) = \frac{1}{2\pi} \int_0^a
+         \frac{\exp\!\left(-\tfrac{1}{2}h^2(1+x^2)\right)}{1+x^2} \, dx
+
+  Computed via 13-point Gauss-type quadrature on the canonical integral
+  form (Patefield & Tandy 2000 method T5).
+  The full 18-region dispatch from Patefield & Tandy is
+  intentionally avoided because XLA evaluates every branch of a
+  ``where`` / ``select`` unconditionally, which turns per-region
+  dispatch into added cost rather than savings.
+
+  Args:
+    h: array_like, real-valued.
+    a: array_like, real-valued.
+
+  Returns:
+    Array of Owen's T values with dtype matching the promoted inputs.
+
+  See also:
+    :func:`jax.scipy.special.ndtr`
+  """
+  h, a = promote_args_inexact("owens_t", h, a)
+  return _owens_t_impl(h, a)
 
 
 def softmax(x: ArrayLike,

@@ -218,7 +218,7 @@ class JaxExportTest(jtu.JaxTestCase):
 
     with self.subTest("static_argnames"):
 
-      @functools.partial(jax.jit, static_argnames=["c"])
+      @jax.jit(static_argnames=["c"])
       def f(x, *, c):
         return c * jnp.sin(x)
 
@@ -229,7 +229,7 @@ class JaxExportTest(jtu.JaxTestCase):
 
     with self.subTest("static_argnums"):
 
-      @functools.partial(jax.jit, static_argnums=[1])
+      @jax.jit(static_argnums=[1])
       def g(x, c):
         return c * jnp.sin(x)
 
@@ -315,7 +315,7 @@ class JaxExportTest(jtu.JaxTestCase):
       return jnp.sin(x)
 
     def my_lowering_rule(ctx, arg, **_):
-      return mlir.hlo.CosineOp(arg).results
+      return [mlir.hlo.cosine(arg)]
 
     exp = get_exported(f, _override_lowering_rules=(
         (lax.sin_p, my_lowering_rule),))(42.)
@@ -430,6 +430,74 @@ class JaxExportTest(jtu.JaxTestCase):
         deserialize_auxdata=lambda b: b.decode("utf-8")
     )
     x2 = CustomType(4, 5, "foo")
+
+    def f(x1, x2):
+      return (x1, x2, x1, x2)  # return 2 copies, to check that types are shared
+
+    exp = export.export(jax.jit(f))(x1, x2)
+    res = exp.call(x1, x2)
+    self.assertEqual(tree_util.tree_structure(res),
+                     tree_util.tree_structure((x1, x2, x1, x2)))
+    self.assertEqual(type(res[0]), type(x1))
+    self.assertEqual(type(res[1]), type(x2))
+    self.assertEqual(type(res[2]), type(x1))
+    self.assertEqual(type(res[3]), type(x2))
+    ser = exp.serialize()
+    exp2 = export.deserialize(ser)
+    self.assertEqual(exp2.in_tree, exp.in_tree)
+    self.assertEqual(exp2.out_tree, exp.out_tree)
+    res2 = exp2.call(x1, x2)
+    self.assertEqual(tree_util.tree_structure(res2),
+                     tree_util.tree_structure(res))
+
+  def test_pytree_custom_types_shape_dependent_metadata(self):
+    if not CAN_SERIALIZE: raise unittest.SkipTest("test requires flatbuffers")
+    test_instance = self
+
+    @tree_util.register_pytree_node_class
+    class CustomType2:
+      def __init__(
+          self, array: jax.Array, per_element_description: tuple[str, ...]):
+        # The per_element_description must match the number of elements in the
+        # array.
+        test_instance.assertLen(array.shape, 1)
+        test_instance.assertLen(per_element_description, array.shape[0])
+        self.array = array
+        self.per_element_description = per_element_description
+
+      def tree_flatten(self):
+        return (self.array,), self.per_element_description
+
+      @classmethod
+      def tree_unflatten(cls, aux_data, children):
+        per_element_description = aux_data
+        assert len(children) == 1
+        return cls(children[0], per_element_description)
+
+    export.register_pytree_node_serialization(
+      CustomType2,
+      serialized_name="CustomType2",
+      serialize_auxdata=lambda aux: "/".join(aux).encode("utf-8"),
+      deserialize_auxdata=lambda b: tuple(b.decode("utf-8").split("/")))
+
+    def get_custom_type(num_elements: int):
+      return CustomType2(
+          np.arange(num_elements, dtype=np.float32),
+          tuple(str(i) for i in range(num_elements))
+          )
+
+    # We put many of these in a complex structure, each with a different shape,
+    # to test that deserialization assigns metadata (per_element_description)
+    # to the correct flattened leaves.
+    x1 = collections.OrderedDict(
+        [("foo", get_custom_type(2)),
+         ("baz", get_custom_type(3)),
+         ("something", get_custom_type(4))])
+    x2 = ([get_custom_type(5),
+           get_custom_type(6)],
+          {"a": get_custom_type(7), "b": get_custom_type(8)},
+          {"b": get_custom_type(9), "a": get_custom_type(10)}
+          )
 
     def f(x1, x2):
       return (x1, x2, x1, x2)  # return 2 copies, to check that types are shared
@@ -565,7 +633,7 @@ class JaxExportTest(jtu.JaxTestCase):
       context["for_export"] = ctx.module_context.lowering_parameters.for_export
       context["hoist_constants_as_args"] = ctx.module_context.lowering_parameters.hoist_constants_as_args
       context["export_ignore_forward_compatibility"] = ctx.module_context.lowering_parameters.export_ignore_forward_compatibility
-      return mlir.hlo.AddOp(arg, arg).results
+      return [mlir.hlo.add(arg, arg)]
 
     mlir.register_lowering(test_primitive, test_primitive_lowering)
     test_primitive.def_impl(functools.partial(dispatch.apply_primitive,
@@ -1343,7 +1411,7 @@ class JaxExportTest(jtu.JaxTestCase):
       self.skipTest("Need at least 2 devices")
 
     mesh_1 = Mesh(jax.local_devices()[:1], "i")
-    @functools.partial(jax.jit,
+    @jax.jit(
                        in_shardings=NamedSharding(mesh_1, P("i")))
     def f_with_sharding(x):
       return jnp.sum(x ** 2, axis=0)
@@ -1367,7 +1435,7 @@ class JaxExportTest(jtu.JaxTestCase):
       self.skipTest("Need at least 3 devices")
 
     mesh_1 = Mesh(jax.local_devices()[:2], "i")
-    @functools.partial(jax.jit,
+    @jax.jit(
                        in_shardings=NamedSharding(mesh_1, P("i")))
     def f_with_sharding(x):
       return jnp.sum(x ** 2, axis=0)
@@ -1881,8 +1949,8 @@ class JaxExportTest(jtu.JaxTestCase):
       # Lowering n * x
       res = x
       for i in range(n - 1):
-        res = mlir.hlo.AddOp(res, x)
-      return res.results
+        res = mlir.hlo.add(res, x)
+      return [res]
 
     times_2 = core.Primitive("__testing_times_2")  # x2 for cpu
     times_2.def_abstract_eval(lambda x: x)
@@ -2002,11 +2070,13 @@ class JaxExportTest(jtu.JaxTestCase):
       res_exp = exp.call(a_device)
       self.assertArraysAllClose(res_native, res_exp)
 
+  @jtu.run_on_devices('tpu')
   def test_compute_on_host(self):
     operand = np.float32(0.)
 
     @jax.jit
-    @compute_on.compute_on("device_host")
+    @compute_on.compute_on2(compute_type="device_host",
+                            out_memory_spaces=jax.memory.Space.Device)
     def f_host(x):
       # Adds 1 on CPU, which should be the result on all platforms because
       # this code should always run on the host.

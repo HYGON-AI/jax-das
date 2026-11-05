@@ -246,7 +246,7 @@ def build_ffi_lowering_function(
             f"of at least 4; got api_version={kwargs['api_version']}.")
       kwargs["backend_config"] = backend_config
     if "result_types" not in kwargs:
-      kwargs["result_types"] = mlir.flatten_ir_types(map(mlir.aval_to_ir_types, ctx.avals_out))
+      kwargs["result_types"] = mlir.flatten_ir_types([mlir._aval_to_ir_types(ctx.module_context, a) for a in ctx.avals_out])
     if not skip_ffi_layout_processing:
       if operand_layouts is None:
         kwargs["operand_layouts"] = map(
@@ -269,7 +269,7 @@ def build_ffi_lowering_function(
     if "result_shapes" not in kwargs and not all(
         core.is_constant_shape(_aval_shape(aval)) for aval in ctx.avals_out):
       kwargs["result_shapes"] = [
-          mlir.shape_tensor(mlir.eval_dynamic_shape_as_ivals(ctx, _aval_shape(aval)))
+          mlir.shape_tensor(ctx.module_context, mlir.eval_dynamic_shape_as_ivals(ctx, _aval_shape(aval)))
           for aval in ctx.avals_out]
 
     return mlir.custom_call(call_target_name, operands=operands, **kwargs)
@@ -551,7 +551,7 @@ def ffi_call(
               "and an output with a different layout "
               f"{static_output_layouts[o_idx]}.")
         static_input_output_aliases.append((i_idx, o_idx))
-    args = core.standard_insert_pvary(*args)
+    args = core.auto_insert_reshard(*args)
     results = ffi_call_p.bind(
         *args,
         result_avals=result_avals,
@@ -680,8 +680,8 @@ def ffi_batching_rule(
     result_avals: Sequence[core.ShapedArray],
     **kwargs: Any,
 ):
-  from jax._src.lax import control_flow  # pytype: disable=import-error
-  from jax._src.lax import lax  # pytype: disable=import-error
+  from jax._src.lax import control_flow  # pyrefly: ignore[missing-import]
+  from jax._src.lax import lax  # pyrefly: ignore[missing-import]
 
   axis_size, = {a.shape[d] for a, d in zip(args, dims)
                 if d is not batching.not_mapped}

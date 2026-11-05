@@ -595,7 +595,8 @@ class LaxBackedNumpyTests(jtu.JaxTestCase):
           ("matrix-tensor", (5, 2), (3, 2, 4)),
           ("tensor-matrix", (5, 2, 3), (3, 2)),
           ("tensor-tensor", (5, 3, 4), (5, 4, 1)),
-          ("tensor-tensor-broadcast", (3, 1, 3, 4), (5, 4, 1))]],
+          ("tensor-tensor-broadcast", (3, 1, 3, 4), (5, 4, 1)),
+          ("tensor-tensor-both-1", (1, 5, 4), (1, 4, 3))]],
     lhs_dtype=number_dtypes,
     rhs_dtype=number_dtypes,
   )
@@ -612,6 +613,15 @@ class LaxBackedNumpyTests(jtu.JaxTestCase):
     with jtu.strict_promotion_if_dtypes_match([lhs_dtype, rhs_dtype]):
       self._CheckAgainstNumpy(np_fun, jnp.matmul, args_maker, tol=tol)
       self._CompileAndCheck(jnp.matmul, args_maker, atol=tol, rtol=tol)
+
+  def testMatmulBothSize1BatchDimsSqueezedJaxpr(self):
+    x = jax.ShapeDtypeStruct((1, 5, 4), jnp.float32)
+    y = jax.ShapeDtypeStruct((1, 4, 3), jnp.float32)
+    jaxpr = jax.make_jaxpr(jnp.matmul)(x, y)
+    [dot_eqn] = (eqn for eqn in jaxpr.jaxpr.eqns if eqn.primitive == lax.dot_general_p)
+    self.assertEqual(dot_eqn.invars[0].aval.shape, (5, 4))
+    self.assertEqual(dot_eqn.invars[1].aval.shape, (4, 3))
+    self.assertEqual(dot_eqn.params['dimension_numbers'], (((1,), (0,)), ((), ())))
 
   @jtu.sample_product(
       lhs_batch=broadcast_compatible_shapes,
@@ -3364,6 +3374,29 @@ class LaxBackedNumpyTests(jtu.JaxTestCase):
                             canonicalize_dtypes=False)
     self._CompileAndCheck(jnp_fun, args_maker)
 
+  def testArrayPositionalDeprecation(self):
+    x = jnp.array([1, 2, 3])
+
+    with self.assertDeprecationWarnsOrRaises(
+        'jax-array-positional-args',
+        'Passing the copy, order, and ndmin arguments to jnp.array',
+    ):
+      out = jnp.array(x, None, False)
+    self.assertIs(x, out)
+
+    with self.assertDeprecationWarnsOrRaises(
+        'jax-array-positional-args',
+        'Passing the copy, order, and ndmin arguments to jnp.array',
+    ):
+      out = jnp.array(x, None, True)
+    self.assertIsNot(x, out)
+
+    with self.assertRaisesRegex(TypeError, "array\\(\\) got multiple values for argument 'copy'"):
+      jnp.array(x, None, True, copy=False)
+
+    with self.assertRaisesRegex(TypeError, "array\\(\\) takes at most 5 positional arguments"):
+      jnp.array(x, None, True, "K", 0, "extra")
+
   @jtu.sample_product(copy=[None, True, False])
   def testAsarrayCopy(self, copy):
     x_jax = jnp.arange(4)
@@ -5733,7 +5766,7 @@ class LaxBackedNumpyTests(jtu.JaxTestCase):
         lambda: jax.jit(jnp.zeros)(2))
 
   def testTraceMethod(self):
-    x = self.rng().randn(3, 4).astype(jnp.float_)
+    x = self.rng().randn(3, 4).astype(float)
     self.assertAllClose(x.trace(), jnp.array(x).trace())
     self.assertAllClose(x.trace(), jax.jit(lambda y: y.trace())(x))
 
@@ -6431,6 +6464,7 @@ class NumpySignaturesTest(jtu.JaxTestCase):
 
     extra_params = {
       'arange': ['start'],
+      'array': ['args', 'device', 'out_sharding'],
       'compress': ['size', 'fill_value'],
       'einsum': ['subscripts', 'precision'],
       'einsum_path': ['subscripts'],

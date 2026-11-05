@@ -42,7 +42,8 @@ from jax._src.typing import Array, ArrayLike, Index
 def _scatter_update(x: ArrayLike, idx: Index | tuple[Index, ...],
                     y: ArrayLike, scatter_op: Callable[..., Array],
                     indices_are_sorted: bool, unique_indices: bool,
-                    mode: slicing.GatherScatterMode | str | None = None, normalize_indices: bool = True,
+                    mode: slicing.GatherScatterMode | str | None = None,
+                    normalize_indices: bool = True,
                     out_sharding: NamedSharding | None = None):
   """Helper for indexed updates.
 

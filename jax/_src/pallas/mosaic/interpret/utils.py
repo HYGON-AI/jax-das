@@ -140,10 +140,23 @@ class TPULoggingInfo(LoggingInfo):
 class GPULoggingInfo(LoggingInfo):
   """Logging info for GPU interpret mode."""
 
-  pallas_thread_id: int
+  # The grid point coordinates of the cluster that the thread with `thread_id`
+  # below belongs to. We allow `None` to enable logging when grid point
+  # coordinates are not available. This is the case, in particular, for the
+  # initialization code that the interpreter runs (to allocate buffers etc.)
+  # before executing a kernel (in the grid loop).
+  grid_point_coords: tuple[int, ...] | None
+
+  # The (flat) thread ID within the cluster. Note that all threads in the blocks
+  # in a cluster run concurrently. This thread ID is a single integer that
+  # identifies one of the concurrent threads in the blocks in the cluster.
+  thread_id: int
 
   def get_location_str(self) -> str:
-    return f"Device {self.device_id}, (Pallas) thread {self.pallas_thread_id}"
+    return (
+        f"Device {self.device_id}, grid point: {self.grid_point_coords},"
+        f" thread {self.thread_id}"
+    )
 
 
 class Counter:
@@ -343,6 +356,53 @@ def to_range(transforms) -> tuple[slice | int, ...]:
         ret, tuple(_transform_slice_or_index(i) for i in transform.indices)
     )
   return ret
+
+
+def is_range_out_of_bounds_for_shape(
+    rnge: tuple[slice | int, ...], shape: tuple[int, ...]
+) -> bool:
+  """Returns whether `rnge` is at least partially out of bounds for `shape`."""
+  for d, r in zip(shape, rnge, strict=True):
+    if isinstance(r, int):
+      assert 0 <= r
+      if r >= d:
+        return True
+    elif isinstance(r, slice):
+      assert r.start is not None and 0 <= r.start
+      assert r.stop is not None and 0 <= r.stop
+
+      if r.step is None:
+        if r.stop > d:
+          return True
+      else:
+        assert 0 <= r.step
+        num_elements_in_slice = (r.stop - r.start + r.step - 1) // r.step
+        if num_elements_in_slice > 0:
+          last_index = r.start + (num_elements_in_slice - 1) * r.step
+          if last_index >= d:
+            return True
+    else:
+      raise ValueError(f"Unsupported range type: {type(r)}.")
+  return False
+
+
+def clip_range_to_shape(
+    rnge: tuple[slice | int, ...], shape: tuple[int, ...]
+) -> tuple[slice | int, ...] | None:
+  """Clips `slice`s in `rnge` to the `shape`. Returns None if `rnge` is entirely out of bounds."""
+  result: list[slice | int] = []
+  for r, l in zip(rnge, shape, strict=True):
+    if isinstance(r, int):
+      if r >= l:
+        return None
+      result.append(r)
+    elif isinstance(r, slice):
+      if r.start >= l:
+        return None
+      result.append(slice(r.start, min(r.stop, l), r.step))
+    else:
+      raise ValueError(f"Unsupported range type: {type(r)}.")
+  return tuple(result)
 
 
 def get_next_indices(grid, indices):

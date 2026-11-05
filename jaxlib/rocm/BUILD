@@ -15,11 +15,11 @@
 # AMD HIP kernels
 
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
-load("@rules_python//python:defs.bzl", "py_library")
 load(
     "//jaxlib:jax.bzl",
     "if_rocm_is_configured",
     "jax_bzl_library",
+    "py_library",
     "rocm_library",
 )
 load("//jaxlib/rocm:rocm_rpath.bzl", "rocm_nanobind_extension")
@@ -515,6 +515,7 @@ cc_library(
     srcs = ["//jaxlib/gpu:triton_kernels.cc"],
     hdrs = ["//jaxlib/gpu:triton_kernels.h"],
     deps = [
+        ":ffi_wrapper",
         ":hip_gpu_kernel_helpers",
         ":hip_vendor",
         ":triton_utils",
@@ -524,6 +525,7 @@ cc_library(
         "@com_google_absl//absl/cleanup",
         "@com_google_absl//absl/container:flat_hash_map",
         "@com_google_absl//absl/container:flat_hash_set",
+        "@com_google_absl//absl/hash",
         "@com_google_absl//absl/log",
         "@com_google_absl//absl/log:check",
         "@com_google_absl//absl/status",
@@ -532,6 +534,7 @@ cc_library(
         "@com_google_absl//absl/strings:str_format",
         "@com_google_absl//absl/strings:string_view",
         "@com_google_absl//absl/synchronization",
+        "@xla//xla/ffi/api:ffi",
         "@xla//xla/service:custom_call_status",
         "@xla//xla/tsl/platform:env",
         "@xla//xla/tsl/platform:errors",
@@ -575,8 +578,10 @@ rocm_nanobind_extension(
         "//jaxlib/gpu:triton_cc_proto",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings",
         "@local_config_rocm//rocm:hip_runtime",
         "@nanobind",
+        "@xla//xla/ffi/api:ffi",
     ],
 )
 

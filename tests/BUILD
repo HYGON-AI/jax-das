@@ -387,6 +387,7 @@ jax_multiplatform_test(
     tags = ["multiaccelerator"],
     deps = [
         "//jax/experimental:compute_on",
+        "//jax/experimental:pallas_mosaic_gpu",
     ] + py_deps([
         "absl/testing",
         "numpy",
@@ -992,6 +993,9 @@ jax_multiplatform_test(
             "nomsan",
             "notsan",  # Times out.
         ],  # TODO(phawkins): Latest SciPy leaks memory.
+        "gpu": [
+            "noasan",  # Times out.
+        ],
     },
     shard_count = {
         "cpu": 40,
@@ -1214,9 +1218,7 @@ jax_multiplatform_test(
         "tpu",
     ],
     tags = ["multiaccelerator"],
-    deps = [
-        "//jax/_src:profiler",
-    ] + py_deps([
+    deps = ["//jax/_src:profiler"] + py_deps([
         "absl/testing",
         "portpicker",
     ]),
@@ -1254,6 +1256,9 @@ jax_multiplatform_test(
     name = "qdwh_test",
     srcs = ["qdwh_test.py"],
     backend_tags = {
+        "gpu": [
+            "noasan",  # Times out
+        ],
         "tpu": [
             "noasan",  # Times out
             "nomsan",  # Times out
@@ -2253,6 +2258,18 @@ jax_multiplatform_test(
     ],
 )
 
+jax_multiplatform_test(
+    name = "local_wheel_smoke_test",
+    srcs = ["local_wheel_smoke_test.py"],
+    enable_backends = ["gpu"],
+    tags = [
+        "local",
+        "manual",
+        "notap",
+    ],
+    deps = py_deps("absl/testing"),
+)
+
 jax_py_test(
     name = "custom_partitioning_sharding_rule_test",
     srcs = ["custom_partitioning_sharding_rule_test.py"],
@@ -2324,5 +2341,16 @@ jax_py_test(
     ] + py_deps([
         "absl/testing",
         "hypothesis",
+    ]),
+)
+
+jax_py_test(
+    name = "hardware_utils_test",
+    srcs = ["hardware_utils_test.py"],
+    deps = [
+        "//jax",
+        "//jax/_src:test_util",
+    ] + py_deps([
+        "absl/testing",
     ]),
 )

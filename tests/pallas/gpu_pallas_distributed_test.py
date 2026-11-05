@@ -14,6 +14,7 @@
 
 """Tests for distributed pallas GPU operations."""
 
+from collections.abc import Sequence
 import dataclasses
 import functools
 import math
@@ -27,6 +28,7 @@ from absl.testing import absltest
 from absl.testing import parameterized
 import jax
 from jax import lax
+from jax._src import dtypes
 from jax._src import test_multiprocess as jt_multiprocess
 from jax._src import test_util as jtu
 from jax._src.config import config
@@ -128,10 +130,10 @@ class TestCase(_TestCaseBase, metaclass=PallasTestMetaclass):
   monkey_patched_api_was_used: bool
 
   def setUp(self):
-    if jtu.test_device_matches(["rocm"]):
+    if jtu.is_device_rocm():
       self.skipTest("Mosaic GPU is not supported on ROCm.")
 
-    if (not jtu.test_device_matches(["cuda"]) or
+    if (not jtu.is_device_cuda() or
         not jtu.is_cuda_compute_capability_at_least("9.0")):
       self.skipTest("Only works on GPU with capability >= sm90")
     if not mgpu.supports_cross_device_collectives():
@@ -141,15 +143,6 @@ class TestCase(_TestCaseBase, metaclass=PallasTestMetaclass):
           " mode is used).")
     if os.environ.get("XLA_PYTHON_CLIENT_ALLOCATOR", "") == "platform":
       self.skipTest("NVSHMEM doesn't work with the platform allocator.")
-
-    # TODO(b/415721295): remove this check once minimum jaxlib version is 0.10.0.
-    # "mgpu.dialect has a backward incompatible change."
-    if not hasattr(mgpu.dialect, "WarpMapOp"):
-      self.skip_if_wg_semantics()
-
-    # TODO(olechwierowicz): Remove this check once min jaxlib version is 0.10.0
-    if not hasattr(mgpu.dialect, "MultimemLoadReduceOp"):
-      self.skip_if_wg_semantics()
 
     self.monkey_patched_api_was_used = False
     super().setUp()
@@ -187,6 +180,15 @@ class TestCase(_TestCaseBase, metaclass=PallasTestMetaclass):
     # the assertion failure on teardown.
     self.monkey_patched_api_was_used = True
     super().skipTest(msg)
+
+  def default_transforms(
+      self, *, swizzle: int = 128, dtype: jnp.dtype
+  ) -> Sequence[plgpu.Transform]:
+    swizzle_elems = 8 * swizzle // dtypes.itemsize_bits(dtype)
+    return (
+        plgpu.TilingTransform((8, swizzle_elems)),
+        plgpu.SwizzleTransform(swizzle),
+    )
 
 
 class PallasCallRemoteDMATest(TestCase):
@@ -600,11 +602,6 @@ class PallasCallRemoteDMATest(TestCase):
     np.testing.assert_allclose(y, jnp.ones_like(y))
 
   def test_semaphore_signal_collective_axes(self):
-    # TODO(b/476264413): Support multimem in multi-thread mode.
-    if jax.local_device_count() > 1:
-      self.monkey_patched_api_was_used = True
-      return  # Multimem not supported in multi-thread mode yet.
-
     if jax.process_index() > 2:
       self.monkey_patched_api_was_used = True
       return  # Only 2 processes needed.
@@ -646,8 +643,6 @@ class PallasCallRemoteDMATest(TestCase):
         raise
 
   def test_semaphore_signal_multicast_collective_axes_warp_level(self):
-    self.skip_if_wg_semantics()
-
     if jax.process_index() > 2:
       self.monkey_patched_api_was_used = True
       return  # Only 2 processes needed.
@@ -727,8 +722,6 @@ class PallasCallRemoteDMATest(TestCase):
 
   @parameterized.parameters(False, True)
   def test_copy_tma(self, use_dict):
-    # TODO(bchetioui): support for remote refs.
-    self.skip_if_wg_semantics()
     if jax.process_index() > 2:
       return  # Only 2 processes needed.
 
@@ -753,7 +746,7 @@ class PallasCallRemoteDMATest(TestCase):
       pl.semaphore_signal(sem, 1, device_id=ids(zero, other_dev_id))
       pl.semaphore_wait(sem)
 
-    transforms = (plgpu.TilingTransform((8, 32)), plgpu.SwizzleTransform(128))
+    transforms = self.default_transforms(dtype=jnp.int32)
     kernel_call = self.pallas_call(
         kernel,
         out_specs=pl.BlockSpec(memory_space=plgpu.GMEM),
@@ -775,7 +768,6 @@ class PallasCallRemoteDMATest(TestCase):
     np.testing.assert_array_equal(y, np.concat([ref, ref], axis=0))
 
   def test_contiguous_copy_tma(self):
-    self.skip_if_wg_semantics()
     if jax.process_index() > 2:
       return  # Only 2 processes needed.
 
@@ -842,12 +834,12 @@ class PallasCallMultimemTest(TestCase):
   def setUp(self):
     if jax.device_count() < 2:
       self.skipTest("Needs at least two devices")
+    super().setUp()
     if any(
       not cuda_versions.cuda_supports_multicast(d.local_hardware_id)
       for d in jax.local_devices()
     ):
       self.skipTest("Not all local devices support multicast")
-    super().setUp()
 
   def test_multimem_store_regs(self):
     # TODO(bchetioui): support for multimem store.
@@ -884,10 +876,6 @@ class PallasCallMultimemTest(TestCase):
     if jax.process_index() > 2:
       return  # Only 2 processes needed.
 
-    if jax.local_device_count() > 1:
-      # TODO(b/498152250): Support lowering a parameter id in the wg semantics.
-      self.skip_if_wg_semantics()
-
     def kernel(y_ref, sem):
       @pl.when(lax.axis_index('x') == 0)
       def _store():
@@ -913,8 +901,6 @@ class PallasCallMultimemTest(TestCase):
     np.testing.assert_array_equal(y, np.concat([ref, ref], axis=0), strict=True)
 
   def test_multimem_store_tma(self):
-    # TODO(bchetioui): support for multimem store.
-    self.skip_if_wg_semantics()
     if jax.process_index() > 2:
       return  # Only 2 processes needed.
 
@@ -929,7 +915,7 @@ class PallasCallMultimemTest(TestCase):
       pl.semaphore_signal(sem, 1, device_id=other_dev_id)
       pl.semaphore_wait(sem)
 
-    transforms = (plgpu.TilingTransform((8, 32)), plgpu.SwizzleTransform(128))
+    transforms = self.default_transforms(dtype=jnp.int32)
     kernel_call = self.pallas_call(
         kernel,
         out_specs=pl.BlockSpec(memory_space=plgpu.GMEM),
@@ -951,7 +937,6 @@ class PallasCallMultimemTest(TestCase):
     np.testing.assert_array_equal(y, np.concat([ref, ref], axis=0))
 
   def test_multimem_store_contiguous_tma(self):
-    self.skip_if_wg_semantics()
     if jax.process_index() > 2:
       return  # Only 2 processes needed.
 
@@ -1118,16 +1103,52 @@ class PallasCallMultimemThreadUnsafeTest(TestCase):
   """
 
   def setUp(self):
-    if jax.local_device_count() > 1:
-      self.skipTest("Multimem not supported in multi-thread mode yet.")
     if jax.device_count() < 2:
       self.skipTest("Needs at least two devices")
+    super().setUp()
     if any(
       not cuda_versions.cuda_supports_multicast(d.local_hardware_id)
       for d in jax.local_devices()
     ):
       self.skipTest("Not all local devices support multicast")
-    super().setUp()
+
+  def test_collective_metadata_with_nvshmem_raises(self):
+    if is_nvshmem_used():
+      self.skipTest("This test runs only in single-process mode.")
+
+    def kernel(y_ref, sem):
+      @pl.when(lax.axis_index('x') == 0)
+      def _store():
+        output = plgpu.layout_cast(lax.broadcasted_iota(jnp.int32, (128, 128), 1), plgpu.Layout.WGMMA)
+        plgpu.multimem_store(output, y_ref, 'x')
+      other_dev_id = 1 - lax.axis_index('x')
+      pl.semaphore_signal(sem, 1, device_id=other_dev_id)
+      pl.semaphore_wait(sem)
+
+    kernel_call = self.kernel(
+        kernel,
+        out_shape=jax.ShapeDtypeStruct((128, 128), jnp.int32),
+        scratch_shapes=[plgpu.SemaphoreType.REGULAR],
+    )
+    mesh = jax.sharding.Mesh(jax.devices()[:2], ["x"])
+    f = jax.jit(
+        jax.shard_map(
+            kernel_call, mesh=mesh, in_specs=(), out_specs=P("x"), check_vma=False,
+        )
+    )
+
+    enable_nvshmem_flag = "--xla_gpu_experimental_enable_nvshmem=true"
+    xla_flags = os.environ.get("XLA_FLAGS", "")
+    if xla_flags:
+      xla_flags = f"{xla_flags} {enable_nvshmem_flag}"
+    else:
+      xla_flags = enable_nvshmem_flag
+    with jtu.set_env(XLA_FLAGS=xla_flags):
+      with self.assertRaisesRegex(
+          Exception,
+          "remove --xla_gpu_experimental_enable_nvshmem from your XLA flags.",
+      ):
+        f().block_until_ready()
 
   def _test_reduce_scatter(
       self,

@@ -211,7 +211,7 @@ class _DimFactor:
     return self._syntactic_cmp(other) >= 0
 
   def evaluate(self, env: DimVarEnv, scope: SymbolicScope):
-    from jax._src.lax import lax  # pytype: disable=import-error
+    from jax._src.lax import lax
 
     if self.var is not None:
       try:
@@ -1344,7 +1344,7 @@ def _dim_as_value_lowering(ctx: mlir.LoweringRuleContext, *,
                            dim):
   res, = mlir.eval_dynamic_shape(ctx, (dim,))
   assert isinstance(res, mlir.ir.Value)
-  out_type = mlir.aval_to_ir_type(ctx.avals_out[0])
+  out_type = mlir.aval_to_ir_type(ctx.module_context, ctx.avals_out[0])
   if out_type != res.type:
     return [mlir.hlo.convert(out_type, res)]
   else:
@@ -1630,10 +1630,9 @@ class _Parser:
       tok = self.next_tok()
     elif tok.exact_type == tokenize.PLUS:
       tok = self.next_tok()
-    # TODO(slebedev): Change to _DimExpr once we migrate off pytype.
-    acc: Any | None = None
+    acc: DimSize | None = None
     while True:
-      t: Any
+      t: DimSize
       t, tok = self.term(tok)
       t_sign = - t if next_t_negated else t
       acc = acc + t_sign if acc is not None else t_sign
@@ -1647,10 +1646,9 @@ class _Parser:
 
   def term(self, tok: tokenize.TokenInfo) -> tuple[DimSize, tokenize.TokenInfo]:
     # A term is product of factors. Each factor may be raised to an integer power.
-    # TODO(slebedev): Change to _DimExpr once we migrate off pytype.
-    acc: Any | None = None
+    acc: DimSize | None = None
     while True:
-      f: Any
+      f: DimSize
       f, tok = self.factor(tok)
       if tok.exact_type == tokenize.CIRCUMFLEX:
         tok = self.next_tok()
@@ -1740,7 +1738,7 @@ dimension_size_p.def_impl(_dimension_size_impl)
 
 def _dimension_size_lowering_rule(ctx, arg, *, dimension):
   dim_size = mlir.hlo.get_dimension_size(arg, dimension)
-  dim_type = mlir.aval_to_ir_type(core.dim_value_aval())
+  dim_type = mlir.aval_to_ir_type(ctx.module_context, core.dim_value_aval())
   if dim_size.type != dim_type:
     dim_size = mlir.hlo.convert(dim_type, dim_size)
   return [dim_size]
@@ -1789,7 +1787,7 @@ class ShapeConstraint:
         ok = (left >= right)
       else:
         assert False  # We are in a context where we know we can evaluate
-                      # all symbolic expressions to constants.
+        # all symbolic expressions to constants.
     except InconclusiveDimensionOperation as e:
       raise self.make_error(eval) from e
     if not ok:
@@ -1803,7 +1801,7 @@ class ShapeConstraint:
     resolved statically, returns a value representing if the
     constraint is satisfied.
     """
-    from jax._src.lax import lax  # pytype: disable=import-error
+    from jax._src.lax import lax
 
     left, right = eval.evaluate(self.left), eval.evaluate(self.right)
     # Try to evaluate the constraint statically.

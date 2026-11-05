@@ -78,15 +78,13 @@ class SideEffectsTest(jtu.JaxTestCase):
     def get_compiled_hlo(side_effect_type):
       @jax.jit
       def f(x):
-        # We use dce_sink to consume the output but allow DCE if the op is pure/dce-able.
-        out = pl.pallas_call(
+        pl.pallas_call(
             kernel,
             out_shape=jax.ShapeDtypeStruct(x.shape, x.dtype),
             compiler_params=pltpu.CompilerParams(
                 has_side_effects=side_effect_type
             ),
         )(x)
-        jax.lax.dce_sink(out)
         return x
 
       lowered = f.lower(jnp.ones((8, 8), dtype=jnp.float32))
