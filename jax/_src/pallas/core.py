@@ -1,5 +1,9 @@
 # Copyright 2023 The JAX Authors.
 #
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# SPDX-License-Identifier: Apache-2.0
+# Modified by Hygon Information Technology Co., Ltd., 2026.
+#
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -146,14 +150,7 @@ class CompilerParams(Protocol):
   __dataclass_fields__: ClassVar[dict[str, dataclasses.Field[Any]]]
 
 
-_ENABLE_DEBUG_CHECKS = config.bool_state(
-    "jax_pallas_enable_debug_checks",
-    default=False,
-    help=(
-        "If set, ``pl.debug_check`` calls are checked at runtime. Otherwise,"
-        " they are a noop."
-    ),
-)
+_ENABLE_DEBUG_CHECKS = config.pallas_enable_debug_checks
 
 
 enable_debug_checks = _ENABLE_DEBUG_CHECKS

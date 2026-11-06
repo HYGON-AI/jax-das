@@ -2,12 +2,12 @@
 
 > [!IMPORTANT]
 > **jax-das** 是面向 DAS 架构的 jax 下游适配发行版，
-> 本项目基于 [ROCm/jax](https://github.com/ROCm/jax) 的 `rocm-jaxlib-v0.10.0`（`a9bf75e1b21f7507099d868fdf8645e2792bfd68`）基线构建并集成 DAS 支持。
-> 本项目不是 jax 官方发行版，而是基于[ROCm/jax](https://github.com/ROCm/jax/tree/rocm-jaxlib-v0.10.0) 二次开发；ROCm jax 源自[jax-ml/jax](https://github.com/jax-ml/jax/tree/jax-v0.10.0)二次开发。
+> 本项目基于 [ROCm/jax](https://github.com/ROCm/jax) 的 `rocm-jaxlib-v0.10.1`（`45f2ff649014d665fdc0dadd094e22173cf67da0`）基线构建并集成 DAS 支持。
+> 本项目不是 jax 官方发行版，而是基于[ROCm/jax](https://github.com/ROCm/jax/tree/rocm-jaxlib-v0.10.1) 二次开发；ROCm jax 源自[jax-ml/jax](https://github.com/jax-ml/jax/tree/jax-v0.10.1)二次开发。
 
 * **目标架构：** jax
-* **上游版本：** rocm-jaxlib-v0.10.0
-* **上游基线：** `https://github.com/ROCm/jax/tree/a9bf75e1b21f7507099d868fdf8645e2792bfd68`
+* **上游版本：** rocm-jaxlib-v0.10.1
+* **上游基线：** `https://github.com/ROCm/jax/tree/45f2ff649014d665fdc0dadd094e22173cf67da0`
 * **Python 发布包名：** `jax-das`
 * **Python 导入名：** `jax`
 * **上游许可证：** Apache-2.0
@@ -162,29 +162,7 @@ ls /opt/dtk/aillvm/bin/
 
 如能看到 `clang`、`clang++`、`llvm-ar`、`ld.lld` 等常用编译工具，则说明安装完成。
 
-### 5. 设置 Python 与 DTK 环境变量
-
-Python 3.11：
-
-```bash
-export PYTHON_BIN=python3.11
-```
-
-Python 3.12：
-
-```bash
-export PYTHON_BIN=python3.12
-```
-
-`DTK_VERSION` 需与实际使用的 DTK 版本保持一致，该变量决定产出 wheel 的 `dtkversion` 标签。
-
-DTK 26.04：
-
-```bash
-export DTK_VERSION=26.04
-```
-
-### 6. 编译 jax
+### 5. 编译 jax
 
 可选：设置 PyPI 镜像源。
 
@@ -195,7 +173,7 @@ printf '[global]\nindex-url = https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simp
 拉取 JAX 源码(本项目)：
 
 ```bash
-git clone -b v0.10.0-das http://github.com/HYGON-AI/jax-das.git
+git clone -b main https://github.com/HYGON-AI/jax-das.git
 ```
 
 进入源码目录并开始编译：
@@ -212,15 +190,15 @@ bash build_jax_dtk.sh
 示例：
 
 ```text
-jax-0.10.0+das.opt1.dtk{dtkversion}-py3-none-any.whl
-jax_rocm6_pjrt-0.10.0+das.opt1.dtk{dtkversion}-py3-none-manylinux_2_27_x86_64.whl
-jax_rocm6_plugin-0.10.0+das.opt1.dtk{dtkversion}-{cpversion}-{cpversion}-manylinux_2_27_x86_64.whl
-jaxlib-0.10.0+das.opt1.dtk{dtkversion}-{cpversion}-{cpversion}-manylinux_2_27_x86_64.whl
+jax-0.10.1+das.opt1.dtk{dtkversion}-py3-none-any.whl
+jax_rocm6_pjrt-0.10.1+das.opt1.dtk{dtkversion}-py3-none-manylinux_{glibcversion}_x86_64.whl
+jax_rocm6_plugin-0.10.1+das.opt1.dtk{dtkversion}-{cpversion}-{cpversion}-manylinux_{glibcversion}_x86_64.whl
+jaxlib-0.10.1+das.opt1.dtk{dtkversion}-{cpversion}-{cpversion}-manylinux_{glibcversion}_x86_64.whl
 ```
 
-其中，`{cpversion}` 对应 Python 版本，例如，Python 3.12 对应 `cp312`；dtk`{dtkversion}`对应 dtk 版本，如 dtk26.04 对应dtk2604。
+其中，`{cpversion}` 对应 Python 版本，例如，Python 3.12 对应 `cp312`；dtk`{dtkversion}`对应 dtk 版本，如 dtk26.04 对应dtk2604；`{glibcversion}` 对应编译镜像的 glibc 版本，例如，glibc 2.28 对应 `2_28`。
 
-### 7. 安装 jax 
+### 6. 安装 jax
 
 安装 `./dist/` 目录下的 wheel 文件：
 
