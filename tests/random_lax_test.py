@@ -31,13 +31,15 @@ from jax import random
 from jax._src import config
 from jax._src import core
 from jax._src import dtypes
-from jax._src.random import _safe_int_to_float
+from jax._src.random import _safe_int_to_float, _check_broadcast_shapes
 from jax._src import test_util as jtu
 from jax import vmap
 
 from jax._src import prng as prng_internal
 
 config.parse_flags_with_absl()
+
+jtu.request_cpu_devices(8)
 
 float_dtypes = jtu.dtypes.all_floating
 complex_dtypes = jtu.dtypes.complex
@@ -206,6 +208,63 @@ class CommonRandomTest(RandomTestBase):
       # just lower, don't run, takes too long
       jax.jit(f).lower()
 
+
+
+_OUT_SHARDING_CASES = [
+    ('bernoulli', lambda key, n, s: random.bernoulli(key, p=0.5, shape=(n,), out_sharding=s)),
+    ('beta', lambda key, n, s: random.beta(key, 0.2, 5.0, shape=(n,), out_sharding=s)),
+    ('bits', lambda key, n, s: random.bits(key, shape=(n,), out_sharding=s)),
+    ('ball', lambda key, n, s: random.ball(key, d=3, shape=(n,), out_sharding=s)),
+    ('categorical_1', lambda key, n, s: random.categorical(key, jnp.asarray([0.0, 1.0, 2.0]), shape=(n,), out_sharding=s, replace=True)),
+    ('categorical_2', lambda key, n, s: random.categorical(key, jnp.ones((n,)), shape=(n,), out_sharding=s, replace=False)),
+    ('categorical_3', lambda key, n, s: random.categorical(key, jnp.ones((n, 3), out_sharding=s), shape=(n,), out_sharding=s, replace=True)),
+    ('categorical_4', lambda key, n, s: random.categorical(key, jnp.ones((n, 3), out_sharding=s), shape=(n,), out_sharding=s, replace=False)),
+    ('cauchy', lambda key, n, s: random.cauchy(key, shape=(n,), out_sharding=s)),
+    ('chisquare', lambda key, n, s: random.chisquare(key, df=1.0, shape=(n,), out_sharding=s)),
+    ('dirichlet', lambda key, n, s: random.dirichlet(key, jnp.ones(3), shape=(n,), out_sharding=s)),
+    ('exponential', lambda key, n, s: random.exponential(key, shape=(n,), out_sharding=s)),
+    ('f', lambda key, n, s: random.f(key, dfnum=2.0, dfden=3.0, shape=(n,), out_sharding=s)),
+    ('gumbel', lambda key, n, s: random.gumbel(key, shape=(n,), out_sharding=s)),
+    ('multivariate_normal', lambda key, n, s: random.multivariate_normal(key, mean=jnp.zeros((n,)), cov=jnp.eye(n), shape=(n,), out_sharding=s)),
+    ('laplace', lambda key, n, s: random.laplace(key, shape=(n,), out_sharding=s)),
+    ('loggamma', lambda key, n, s: random.loggamma(key, a=2.0, shape=(n,), out_sharding=s)),
+    ('logistic', lambda key, n, s: random.logistic(key, shape=(n,), out_sharding=s)),
+    ('lognormal', lambda key, n, s: random.lognormal(key, sigma=1.0, shape=(n,), out_sharding=s)),
+    ('normal', lambda key, n, s: random.normal(key, shape=(n,), out_sharding=s)),
+    ('orthogonal', lambda key, n, s: random.orthogonal(key, n=3, shape=(n,), out_sharding=s)),
+    ('permutation', lambda key, n, s: random.permutation(key, n, out_sharding=s)),
+    ('pareto', lambda key, n, s: random.pareto(key, b=3.0, shape=(n,), out_sharding=s)),
+    ('poisson', lambda key, n, s: random.poisson(key, lam=3.0, shape=(n,), out_sharding=s)),
+    ('rademacher', lambda key, n, s: random.rademacher(key, shape=(n,), out_sharding=s)),
+    ('randint', lambda key, n, s: random.randint(key, shape=(n,), minval=0, maxval=10, out_sharding=s)),
+    ('rayleigh', lambda key, n, s: random.rayleigh(key, shape=(n,), scale=0.5, out_sharding=s)),
+    ('t', lambda key, n, s: random.t(key, df=10.0, shape=(n,), out_sharding=s)),
+    ('truncated_normal', lambda key, n, s: random.truncated_normal(key, lower=-2., upper=2., shape=(n,), out_sharding=s)),
+    ('uniform', lambda key, n, s: random.uniform(key, shape=(n,), out_sharding=s)),
+    ('gamma', lambda key, n, s: random.gamma(key, a=2.0, shape=(n,), out_sharding=s)),
+    ('wald', lambda key, n, s: random.wald(key, mean=1.0, shape=(n,), out_sharding=s)),
+]
+
+
+class RandomOutShardingTest(RandomTestBase):
+  """Tests that out_sharding arguments are obeyed for jax.random functions."""
+
+  def _make_sharding(self):
+    n = min(jax.device_count(), 4)
+    mesh = jtu.create_mesh((n,), ('x',),
+                           axis_types=(jax.sharding.AxisType.Explicit,))
+    return jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec('x'))
+
+  @parameterized.named_parameters(_OUT_SHARDING_CASES)
+  def test_out_sharding(self, fn):
+    key = random.key(0)
+    sharding = self._make_sharding()
+    n = sharding.mesh.shape['x']
+    with jax.set_mesh(sharding.mesh):
+      result = fn(key, n, sharding)
+      jit_result = jax.jit(fn, static_argnums=(1, 2))(key, n, sharding)
+    self.assertTrue(result.sharding.is_equivalent_to(sharding, result.ndim))
+    self.assertTrue(result.sharding.is_equivalent_to(sharding, jit_result.ndim))
 
 class DistributionsTest(RandomTestBase):
   """
@@ -1443,7 +1502,7 @@ class DistributionsTest(RandomTestBase):
     # Shouldn't error or warn:
     with self.assertNoWarnings():
       jax.random.key_data(keys())
-      jax.random.key_impl(keys())
+      keys().dtype
 
   @jtu.sample_product(
     dtype=['int8', 'uint8', 'int16', 'uint16']
@@ -1700,6 +1759,11 @@ class UnsafeRBGPRNGTest(RBGPRNGTest):
     self.assertArraysEqual(random.key_data(vmapped_keys),
                            random.key_data(ref_keys))
 
+
+class RandomUtilTest(RandomTestBase):
+  def test_check_broadcast_shapes_empty(self):
+    self.assertEqual(_check_broadcast_shapes("empty_test", (2,3)), (2,3))
+    self.assertEqual(_check_broadcast_shapes("empty_test", None), ())
 
 if __name__ == "__main__":
   absltest.main(testLoader=jtu.JaxTestLoader())

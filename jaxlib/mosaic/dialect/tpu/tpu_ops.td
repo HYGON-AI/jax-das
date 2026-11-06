@@ -160,7 +160,17 @@ def TPU_TiledLayoutAttr
   let extraClassDeclaration = [{
     static ::llvm::SmallVector<int64_t> getDefaultTileStrides(::llvm::ArrayRef<::xla::Tile> tiles, ::llvm::ArrayRef<int64_t> shape);
     static TiledLayoutAttr getContiguous(::mlir::MLIRContext* context, ::llvm::ArrayRef<::xla::Tile> tiles, ::llvm::ArrayRef<int64_t> shape);
-    bool tilesAreKnownContiguous(::llvm::ArrayRef<int64_t> shape) const;
+
+    // Returns the number of trailing dimensions where tiles can be statically
+    // determined to be contiguous (there are no gaps or overlap between tiles).
+    // NOTE: Tiles being contiguous does not imply the _data_ is contiguous
+    //   since the tiles may contain padding. This means this function is
+    //   different from MemRefType::getNumContiguousTrailingDims.
+    int64_t getNumTrailingDimsWithContiguousTiles(
+        ::llvm::ArrayRef<int64_t> shape) const;
+    bool tilesAreKnownContiguous(const ::llvm::ArrayRef<int64_t> shape) const {
+      return getNumTrailingDimsWithContiguousTiles(shape) == getRank();
+    }
 
     int64_t getRank() const {
       return getTileStrides().size();
@@ -885,6 +895,7 @@ def TPU_DynamicGatherOp : TPU_Op<"dynamic_gather", [Pure, DeclareOpInterfaceMeth
     $source `[` $indices `]` `in` $dimensions attr-dict
     `:` type($source) `,` type($indices) `->` type($output)
   }];
+  let hasCanonicalizeMethod = 1;
   let hasVerifier = 1;
 }
 
@@ -967,7 +978,9 @@ def TPU_MatmulOp : TPU_Op<"matmul", [Pure]> {
     DefaultValuedAttr<BoolAttr, "false">:$transpose_rhs,
     OptionalAttr<TPU_ContractPrecisionEnum>:$precision,
     // NOTE: User-level optional, once canonicalized, always present.
-    OptionalAttr<TPU_DotDimensionNumbersAttr>:$dimension_numbers
+    OptionalAttr<TPU_DotDimensionNumbersAttr>:$dimension_numbers,
+    // Hint to compilers whether to fuse the transposed LHS in the matmul.
+    BoolAttr:$transpose_lhs_hint
   );
   let results = (outs AnyVectorOfNonZeroRank:$result);
   let assemblyFormat = [{
@@ -1237,10 +1250,17 @@ def TPU_MemRefBitcastOp : TPU_Op<"memref_bitcast", [Pure]> {
 }
 
 def TPU_ReinterpretCastOp : TPU_Op<"reinterpret_cast", [Pure]> {
-  let arguments = (ins AnyMemRef:$input);
+  let arguments = (ins
+    AnyMemRef:$input,
+    // Dynamic offset shifts the memref pointer by the specified number of
+    // elements of the output type.
+    // NOTE: The size of the shift must be a multiple of the memory space word
+    // size for lowering to succeed.
+    Optional<I32>:$dynamic_offset
+  );
   let results = (outs AnyMemRef:$result);
   let assemblyFormat = [{
-    $input attr-dict `:` type($input) `->` type($result)
+    $input ($dynamic_offset^)? attr-dict `:` type($input) `->` type($result)
   }];
   let hasVerifier = 1;
 }
@@ -1358,7 +1378,6 @@ def TPU_BarrierOp : TPU_Op<"barrier"> {
 // device_id         : The id of the device to copy to for remote DMAs.
 // core_id           : The id of the core to copy to for remote and cross-core
 //                     DMAs.
-// core_type         : The core type that is being targeted for remote DMAs.
 // priority          : The priority of the DMA.
 // strict_ordering   : True if the DMA requires strict ordering. If false, the
 //                     ordering is either strict or relaxed depending on the
@@ -1368,7 +1387,7 @@ def TPU_EnqueueDMAOp : TPU_Op<"enqueue_dma", [AttrSizedOperandSegments]> {
     AnyMemRef:$source,
     Optional<MemRefOf<[TPU_SomeSemaphoreType]>>:$source_semaphore,
     AnyMemRef:$target,
-    MemRefOf<[TPU_SomeSemaphoreType]>:$target_semaphore,
+    Optional<MemRefOf<[TPU_SomeSemaphoreType]>>:$target_semaphore,
     Optional<I32>:$device_id, // For remote DMAs
     Optional<I32>:$core_id,
     // Smaller number means higher priority. 0 is the highest and the default.
@@ -1379,7 +1398,7 @@ def TPU_EnqueueDMAOp : TPU_Op<"enqueue_dma", [AttrSizedOperandSegments]> {
     `source` `(` $source `:` type($source) `)`
     `target` `(` $target `:` type($target) `)`
     (`source_semaphore` `(` $source_semaphore^ `:` type($source_semaphore) `)`)?
-    `target_semaphore` `(` $target_semaphore `:` type($target_semaphore) `)`
+    (`target_semaphore` `(` $target_semaphore^ `:` type($target_semaphore) `)`)?
     (`device_id` `(` $device_id^ `)`)?
     (`core_id` `(` $core_id^ `)`)?
     attr-dict
@@ -1479,6 +1498,31 @@ def TPU_WaitDMA2Op : TPU_Op<"wait_dma2", [AttrSizedOperandSegments]> {
   let builders = [
     OpBuilder<(ins "Value":$semaphore, "Value":$src, "Value":$dst)>
   ];
+}
+
+// tpu.wait_dma waits for a DMA to complete.
+def TPU_WaitDMAOp : TPU_Op<"wait_dma", [AttrSizedOperandSegments]> {
+  let arguments = (ins
+    AnyMemRef:$source,
+    Optional<MemRefOf<[TPU_SomeSemaphoreType]>>:$source_semaphore,
+    AnyMemRef:$target,
+    Optional<MemRefOf<[TPU_SomeSemaphoreType]>>:$target_semaphore,
+    Optional<I32>:$device_id, // For remote DMAs
+    Optional<I32>:$core_id,
+    DefaultValuedAttr<I32Attr, "0">:$priority,
+    DefaultValuedAttr<BoolAttr, "false">:$strict_ordering,
+    BoolAttr:$wait_target
+  );
+  let assemblyFormat = [{
+    `source` `(` $source `:` type($source) `)`
+    `target` `(` $target `:` type($target) `)`
+    (`source_semaphore` `(` $source_semaphore^ `:` type($source_semaphore) `)`)?
+    (`target_semaphore` `(` $target_semaphore^ `:` type($target_semaphore) `)`)?
+    (`device_id` `(` $device_id^ `)`)?
+    (`core_id` `(` $core_id^ `)`)?
+    attr-dict
+  }];
+  let hasVerifier = 1;
 }
 
 // Like tpu.wait_dma2, but for indirect DMAs.
@@ -1684,8 +1728,7 @@ def TPU_FetchAndAddSyncOp : TPU_Op<"fetch_and_add_sync", [DefaultMemRead, Defaul
     `$indices` must match the rank of the `$base` memref. The `$base` memref
     must be in SMEM. The update is synchronous.
 
-    The `$core_type` and `$core_id` specify the core on which the increment is
-    performed.
+    The `$core_id` specify the core on which the increment is performed.
 
     Example:
 

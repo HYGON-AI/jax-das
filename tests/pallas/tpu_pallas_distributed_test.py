@@ -25,6 +25,7 @@ from jax._src import test_util as jtu
 from jax.experimental import mesh_utils
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
+from jax.experimental.pallas import tpu_sc as plsc
 import jax.numpy as jnp
 import numpy as np
 
@@ -151,11 +152,21 @@ class PallasCallRemoteDMATest(parameterized.TestCase):
   def test_remote_dma_regular_semaphore(self, core_type):
     if not jtu.is_device_tpu_at_least(6):
       self.skipTest('Regular semaphore DMA requires TPU v6+')
-    if core_type == pltpu.CoreType.SC_SCALAR_SUBCORE:
-      if not pltpu.get_tpu_info().sparse_core:
+
+    if core_type is pltpu.CoreType.TC:
+      mesh = pltpu.create_tensorcore_mesh('core')
+    elif core_type is pltpu.CoreType.SC_SCALAR_SUBCORE:
+      if pltpu.get_tpu_info().sparse_core is None:
         self.skipTest('No SparseCores for core_type=sc')
+      mesh = plsc.ScalarSubcoreMesh(axis_name='core')
+    else:
+      self.fail(f'Unsupported {core_type=}')
 
     # Implements very simple remote DMAs using regular semaphores.
+    @pl.kernel(
+        out_type = jax.ShapeDtypeStruct((8, 128), jnp.float32),
+        mesh=mesh,
+    )
     def kernel(x_ref, y_ref):
       def body(ready_sem, send_sem, recv_sem):
         other_dev_id = 1 - lax.axis_index('x')
@@ -180,20 +191,11 @@ class PallasCallRemoteDMATest(parameterized.TestCase):
 
     x = jnp.arange(2 * 8 * 128, dtype=jnp.float32).reshape((2 * 8, 128))
 
-    def body(x):
-      return pl.pallas_call(
-          kernel,
-          in_specs=[pl.BlockSpec(memory_space=pltpu.HBM)],
-          out_specs=pl.BlockSpec(memory_space=pltpu.HBM),
-          out_shape=jax.ShapeDtypeStruct((8, 128), jnp.float32),
-          compiler_params=pltpu.CompilerParams(kernel_type=core_type),
-      )(x)
-
     devices = jax.devices()[:2]
     mesh = jax.sharding.Mesh(devices, ['x'])
     f = jax.jit(
         shard_map.shard_map(
-            body,
+            kernel,
             mesh=mesh,
             in_specs=P('x'),
             out_specs=P('x'),

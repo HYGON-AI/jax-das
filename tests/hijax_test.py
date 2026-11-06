@@ -185,7 +185,7 @@ class TupTy(HiType):
     return hash(self.tys)
 
   def __eq__(self, other):
-    return self.tys == other.tys
+    return isinstance(other, TupTy) and self.tys == other.tys
 
   def lo_ty(self):
     return list(self.tys)
@@ -328,7 +328,7 @@ def _is_zero(x):
 def _get_aval(x):
   return x.aval if _is_zero(x) else core.typeof(x)
 
-def immutbox_to_aval(box: ImmutBox) -> 'ImmutBoxTy':
+def immutbox_to_aval(box: ImmutBox) -> ImmutBoxTy:
   leaves, treedef = jax.tree.flatten(box._val, is_leaf=_is_zero)
   leaf_avals = tuple(map(_get_aval, leaves))
   return ImmutBoxTy(leaf_avals, treedef)
@@ -495,6 +495,22 @@ def square(x):
 
 
 class HijaxTest(jtu.JaxTestCase):
+
+  def test_empty_ref_and_freeze(self):
+    qx = QArray(arr=jnp.ones((2, 3), dtype=jnp.int8),
+                scale=jnp.array([1.5, 2.5], dtype=jnp.float32))
+
+    def f():
+      q_ref = jax.empty_ref(jax.typeof(qx))
+      return jax.freeze(q_ref)
+
+    q_out = jax.jit(f)()
+    self.assertIsInstance(q_out, QArray)
+    self.assertEqual(q_out.arr.shape, (2, 3))
+    self.assertEqual(q_out.scale.shape, (2,))
+    self.assertEqual(q_out.arr.dtype, jnp.int8)
+    self.assertEqual(q_out.scale.dtype, jnp.float32)
+
   def test_basic_register(self):
     # older test that defines a slightly different QArray internally
     @dataclass(frozen=True)
@@ -1347,6 +1363,26 @@ class HijaxTest(jtu.JaxTestCase):
     self.assertAllClose(x_ref[...], 4., check_dtypes=False)
     self.assertEqual(jax.jit(f).trace(0, x_ref).jaxpr.effects, {state.WriteEffect(1)})
 
+  def test_lower_preserves_arg_names_for_shaped_arrays(self):
+    """When all inputs/outputs are ShapedArray, arg_names should be preserved
+    even when the jaxpr is_high due to containing hi-primitives internally."""
+    x = jnp.array(1.0)
+    lowered = jax.jit(square).lower(x)
+    debug_info = lowered._lowering.compile_args['all_args_info'].debug_info
+    self.assertEqual(debug_info.arg_names, ('x',))
+
+  def test_lower_replicates_arg_names_for_hitypes(self):
+    """When inputs are HiType, arg_names should be replicated to match
+    the expanded lo-args (e.g. QArrayTy expands to 2 lo-args)."""
+    def f(x):
+      return from_qarray(x)
+
+    q = to_qarray(jnp.ones((2, 2), 'float32'))
+    lowered = jax.jit(f).lower(q)
+    debug_info = lowered._lowering.compile_args['all_args_info'].debug_info
+    # QArrayTy.lo_ty() returns [int8[m,k], f32[m]], so 'x' is replicated twice
+    self.assertEqual(debug_info.arg_names, ('x', 'x'))
+
 
 class BoxTest(jtu.JaxTestCase):
 
@@ -1639,6 +1675,26 @@ class BoxTest(jtu.JaxTestCase):
 
     f(box, 1.0)
     self.assertAllClose(box.get(), 2.0)
+
+  def test_custom_vjp_is_high_propagation_jaxpr(self):
+    @jax.custom_vjp
+    def foo(x):
+      box = immutbox_new(x)
+      return immutbox_get(box)
+
+    def foo_fwd(x):
+      return foo(x), None
+
+    def foo_bwd(_, g):
+      return g,
+
+    foo.defvjp(foo_fwd, foo_bwd)
+
+    def f(x):
+      return foo(x)
+
+    jaxpr = jax.make_jaxpr(f)(2.0)
+    self.assertTrue(jaxpr.jaxpr.is_high)
 
   @parameterized.parameters([False, True])
   def test_grad_closure_stop_gradient(self, jit):

@@ -75,6 +75,7 @@ class ModuleContext:
   traceback_caches: mlir.TracebackCaches = dataclasses.field(repr=False)
   platform: str
   compute_capability: int | None
+  mlir_ctx: mlir.ModuleContext
 
 
 @dataclasses.dataclass
@@ -304,6 +305,7 @@ def lower_jaxpr_to_triton_module(
     grid_mapping: GridMapping,
     platform: str,
     compute_capability: int | None,
+    mlir_ctx: mlir.ModuleContext,
 ) -> LoweringResult:
   debug_info = jaxpr.debug_info
   if grid_mapping.num_dynamic_grid_bounds:
@@ -323,6 +325,18 @@ def lower_jaxpr_to_triton_module(
     attrs = module.operation.attributes
     module_name = mlir.sanitize_name(debug_info.func_name)
     attrs["sym_name"] = ir.StringAttr.get(module_name)
+    new_mlir_ctx = mlir.ModuleContext(
+        platforms=mlir_ctx.platforms,
+        backend=mlir_ctx.backend,
+        axis_context=mlir_ctx.axis_context,
+        keepalives=mlir_ctx.keepalives,
+        channel_iterator=mlir_ctx.channel_iterator,
+        host_callbacks=mlir_ctx.host_callbacks,
+        lowering_parameters=mlir_ctx.lowering_parameters,
+        context=ir.Context.current,
+        module=module,
+        ip=ir.InsertionPoint(module.body),
+    )
     param_types = [
         # pyrefly: ignore[missing-attribute]
         tt_dialect.PointerType.get(_dtype_to_ir_type(var.aval.dtype), 1)
@@ -357,6 +371,7 @@ def lower_jaxpr_to_triton_module(
           mlir.TracebackCaches(),
           platform,
           compute_capability,
+          mlir_ctx=new_mlir_ctx,
       )
       block_infos = [
           BlockInfo(
@@ -405,9 +420,10 @@ def lower_jaxpr_to_triton_ir(
     invals = map(read_env, eqn.invars)
     if eqn.primitive not in triton_lowering_rules:
       raise NotImplementedError(
-          "Unimplemented primitive in Pallas GPU lowering: "
-          f"{eqn.primitive.name}. "
-          "Please file an issue on https://github.com/jax-ml/jax/issues.")
+          "Unimplemented primitive in Pallas Triton lowering:"
+          f" {eqn.primitive.name}. Please file an issue at"
+          " https://github.com/jax-ml/jax/issues/new/choose."
+      )
     rule = triton_lowering_rules[eqn.primitive]
     avals_in = [v.aval for v in eqn.invars]
     avals_out = [v.aval for v in eqn.outvars]
@@ -1352,7 +1368,7 @@ def _multiple_of_rule(ctx: LoweringRuleContext, x, values: Sequence[int]):
   _set_attr(
       x,
       "tt.divisibility",
-      ir.DenseIntElementsAttr.get(np.asarray(values, dtype=np.int32)),  # pyrefly: ignore[no-matching-overload]
+      ir.DenseIntElementsAttr.get(np.asarray(values, dtype=np.int32)),
   )
   return x
 
@@ -1816,6 +1832,37 @@ def _concatenate_lowering_rule(ctx: LoweringRuleContext, *args, dimension):
   rhs = _reshape(y, y_aval.shape[:-1])
   ret_type = get_join_type(ir.RankedTensorType(rhs.type))
   return tt_dialect.join(ret_type, lhs, rhs)
+
+@register_lowering(jax._src.lax.lax.stack_p)
+def _stack_lowering_rule(ctx: LoweringRuleContext, *args, axis):
+  if len(args) != 2:
+    raise NotImplementedError("Only 2-argument stack is supported in Triton.")
+  [x_aval, y_aval] = ctx.avals_in
+  x, y = args
+  if axis != x_aval.ndim:
+    raise NotImplementedError("Only stack along the last dimension is supported in Triton.")
+
+  x = _ensure_ir_value(x, x_aval)
+  y = _ensure_ir_value(y, y_aval)
+
+  ty = ir.RankedTensorType(x.type)
+  shape = list(ty.shape)
+  shape.append(2)
+  ret_type = ir.RankedTensorType.get(shape, ty.element_type, ty.encoding)
+
+  return tt_dialect.join(ret_type, x, y)
+
+
+@register_lowering(jax._src.lax.lax.unstack_p)
+def _unstack_lowering_rule(ctx: LoweringRuleContext, x, *, axis):
+  [x_aval] = ctx.avals_in
+  if x_aval.shape[axis] != 2:
+    raise NotImplementedError("Only unstack of size 2 is supported in Triton.")
+  if axis != x_aval.ndim - 1:
+    raise NotImplementedError("Only unstack along the last dimension is supported in Triton.")
+
+  x = _ensure_ir_value(x, x_aval)
+  return tuple(tt_dialect.split(x))
 
 
 @register_lowering(lax.split_p)

@@ -478,6 +478,22 @@ class PallasCallPipelineTest(jtu.JaxTestCase):
 
     np.testing.assert_allclose(out, expected_out, atol=5e-5)
 
+  def test_unaligned_slice_hbm_3d(self):
+    M, N = 32, 5  # not aligned with 128.
+
+    def kernel(x_hbm, out_hbm):
+      hbm_slice = x_hbm.at[0, :, :]
+      pltpu.sync_copy(hbm_slice, out_hbm)
+
+    x = jnp.arange(2 * M * N, dtype=jnp.float32).reshape(2, M, N)
+    out = pl.pallas_call(
+        kernel,
+        out_shape=jax.ShapeDtypeStruct((M, N), jnp.float32),
+        grid=(),
+    )(x)
+
+    np.testing.assert_allclose(out, x[0])
+
 
 class PallasCallMultipleBufferedPipelineTest(jtu.JaxTestCase):
 
@@ -782,6 +798,35 @@ class PallasCallMultipleBufferedPipelineTest(jtu.JaxTestCase):
     result = fn(x, y)
     np.testing.assert_allclose(result, x @ y, atol=5e-5)
 
+  def test_single_buffered_output(self):
+    def body(o_ref):
+      @pl.when(pl.program_id(1) == 0)
+      def _():
+        o_ref[...] = jnp.zeros_like(o_ref)
+      o_ref[...] += 1.0
+
+    spec = pl.BlockSpec(
+        (1, 8, 128),
+        lambda b, _: (b, 0, 0),
+        memory_space=pltpu.VMEM,
+        pipeline_mode=pl.Buffered(buffer_count=1),
+    )
+
+    @pl.kernel(
+        out_type=jax.ShapeDtypeStruct((2, 8, 128), jnp.float32),
+        mesh=pltpu.create_tensorcore_mesh('core'),
+    )
+    def run_kernel(o_ref):
+      pltpu.emit_pipeline(
+          body,
+          grid=(2, 3),
+          out_specs=(spec,),
+      )(o_ref)
+
+    out = run_kernel()
+    expected_out = jnp.full((2, 8, 128), 3, jnp.float32)
+    np.testing.assert_allclose(out, expected_out)
+
 
 class PallasCallCollectivePipelineTest(jtu.JaxTestCase):
 
@@ -1066,7 +1111,7 @@ class PallasCallMegacoreTest(jtu.JaxTestCase):
     np.testing.assert_allclose(func(x, y), x @ y, atol=7e-5)
 
 
-@functools.partial(jax.jit, static_argnames=['bm', 'bk', 'bn'])
+@jax.jit(static_argnames=['bm', 'bk', 'bn'])
 def matmul(x: jax.Array, y: jax.Array, *, bm: int, bk: int, bn: int):
 
   m, k = x.shape
@@ -1323,7 +1368,11 @@ class PipelineHijaxTest(jtu.JaxTestCase):
       shape: tuple[int, ...]
       dtype: jnp.dtype
 
-      update = dataclasses.replace
+      def update(self, *, shape=None, dtype=None, **kwargs):
+        changes = {}
+        if shape is not None: changes['shape'] = shape
+        if dtype is not None: changes['dtype'] = dtype
+        return dataclasses.replace(self, **changes)
 
       def lo_ty(self) -> list[hijax.ShapedArray]:
         return [hijax.ShapedArray(self.shape, self.dtype)] * 2

@@ -42,9 +42,11 @@ import weakref
 
 from absl import logging
 from absl.testing import absltest, parameterized
+
 import jax
 from jax import device_put, float0, grad, hessian, jacfwd, jacrev, jit
 from jax import lax
+from jax._src.lax.control_flow.loops import eval_jaxpr_p
 from jax import tree_util
 from jax._src import api, api_util, dtypes, lib
 from jax._src import array
@@ -764,7 +766,7 @@ class JitTest(jtu.BufferDonationTestCase):
 
     class A:
 
-      @functools.partial(jit, static_argnums=(0,))
+      @jit(static_argnums=(0,))
       def my_func_jit(self, x):
         return x+2
 
@@ -775,7 +777,7 @@ class JitTest(jtu.BufferDonationTestCase):
 
       class A:
 
-        @functools.partial(jit, static_argnums=(0,))
+        @jit(static_argnums=(0,))
         @classmethod
         def my_classmethod_jit(cls, x):
           return x+2
@@ -786,7 +788,7 @@ class JitTest(jtu.BufferDonationTestCase):
 
       class A:
 
-        @functools.partial(jit)
+        @jit
         @staticmethod
         def my_staticmethod_jit(x):
           return x + 2
@@ -3021,6 +3023,11 @@ class APITest(jtu.JaxTestCase):
     y, f_jvp = api.linearize(api.jit(jnp.sum), x)
     with self.assertRaisesRegex(ValueError, msg):
       f_jvp(T)
+
+  def test_linearize_instantiates_zero_outputs(self):
+    _, f_lin = api.linearize(lambda x: (x, 1.), 3.)
+    _, y = f_lin(1.)
+    self.assertAllClose(y + 1, 1, check_dtypes=False)  # don't crash
 
   def test_grad_of_int_errors(self):
     # Errors without allow_int=True
@@ -5351,6 +5358,21 @@ class APITest(jtu.JaxTestCase):
         with my_config(4):
           f(1.)
     self.assertEqual(tracing_count(), 4)
+
+  @jtu.thread_unsafe_test()  # make_user_context() is not thread-safe at the moment
+  def test_user_context_global(self):
+    my_config = jax.make_user_context()
+
+    @jax.jit
+    def f(x):
+      return x
+
+    prev_val = my_config.get_global()
+    try:
+      my_config.set_global(2)
+      self.assertEqual(my_config.get_global(), 2)
+    finally:
+      my_config.set_global(prev_val)
 
   # TODO(mattjj,dougalm): re-enable if we set auto_dce=True by default
   # @jtu.run_on_devices('cpu')
@@ -8091,6 +8113,48 @@ class TracebackTest(jtu.JaxTestCase):
 
     f(1.0)
     grad(f)(1.0)
+
+
+class EvalJaxprPrimitiveTest(jtu.JaxTestCase):
+  """Tests for eval_jaxpr_p and its transformation rules."""
+
+  def _bind_eval_jaxpr(self, f, *args):
+    """Trace f into a jaxpr and evaluate it via eval_jaxpr_p.bind."""
+    closed_jaxpr = jax.make_jaxpr(f)(*args)
+    return eval_jaxpr_p.bind(*args, jaxpr=closed_jaxpr)
+
+  def test_eval_jaxpr_impl(self):
+    def f(x, y):
+      return [x * y + 1.0]
+    x, y = jnp.array(3.0), jnp.array(4.0)
+    [result] = self._bind_eval_jaxpr(f, x, y)
+    self.assertAllClose(result, x * y + 1.0)
+
+  def test_eval_jaxpr_jvp(self):
+    def g(x):
+      return self._bind_eval_jaxpr(lambda x: [x ** 3], x)[0]
+    x = jnp.array(2.0)
+    primals, tangents = jax.jvp(g, (x,), (jnp.ones_like(x),))
+    self.assertAllClose(primals, x ** 3)
+    self.assertAllClose(tangents, 3.0 * x ** 2)
+
+  def test_eval_jaxpr_grad(self):
+    def g(x):
+      return self._bind_eval_jaxpr(lambda x: [x ** 3], x)[0]
+    x = jnp.array(2.0)
+    self.assertAllClose(jax.grad(g)(x), 3.0 * x ** 2)
+
+  def test_eval_jaxpr_vmap(self):
+    def g(x):
+      return self._bind_eval_jaxpr(lambda x: [x ** 2 + 1.0], x)[0]
+    xs = jnp.array([1.0, 2.0, 3.0])
+    self.assertAllClose(jax.vmap(g)(xs), xs ** 2 + 1.0)
+
+  def test_eval_jaxpr_jit(self):
+    def g(x):
+      return self._bind_eval_jaxpr(lambda x: [jnp.sin(x)], x)[0]
+    x = jnp.array(1.0)
+    self.assertAllClose(jax.jit(g)(x), jnp.sin(x))
 
 
 if __name__ == '__main__':

@@ -21,12 +21,14 @@ contains only tests that do not use shard_map.
 from collections.abc import Callable
 import dataclasses
 import functools
+from typing import Any
 
 from absl.testing import absltest
 from absl.testing import parameterized
 import jax
 from jax._src import test_util as jtu
 from jax._src.pallas.mosaic.interpret import interpret_pallas_call as mosaic_interpret
+from jax._src.pallas.mosaic.interpret import utils as interpret_utils
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 import jax.numpy as jnp
@@ -80,12 +82,15 @@ class GridPointRecorderContext:
   def __exit__(self, ty, value, traceback):
     ...
 
-  def get_recorder(self) -> Callable[[tuple[np.int32, ...], np.int32], None]:
-    def _recorder(grid_point, core_id):
+  def get_recorder(
+      self,
+  ) -> Callable[[Any, tuple[np.int32, ...], np.int32], Any]:
+    def _recorder(token, grid_point, core_id):
       processed_grid_point = ProcessedGridPoint(
           tuple(int(coord) for coord in grid_point), int(core_id)
       )
       self._grid_points.append(processed_grid_point)
+      return token
 
     return _recorder
 
@@ -169,7 +174,7 @@ class InterpretTest(jtu.JaxTestCase):
     def kernel(x_ref, o_ref):
       o_ref[...] = x_ref[...]
 
-    @functools.partial(jax.jit, static_argnums=(0, 1))
+    @jax.jit(static_argnums=(0, 1))
     def run(input_offset, output_offset):
       return pl.pallas_call(
           kernel,
@@ -199,6 +204,27 @@ class InterpretTest(jtu.JaxTestCase):
         run(0, 2)
       pltpu.reset_tpu_interpret_mode_state()
 
+  def test_inputs_and_outputs_not_evenly_divisible_by_block_shape(self):
+    def kernel(x_ref, y_ref):
+      y_ref[...] = x_ref[...] + 1.0
+
+    shape = (7, 768, 640)
+    x = jnp.arange(np.prod(shape), dtype=jnp.float32).reshape(shape)
+
+    @jax.jit
+    def f(x):
+      return pl.pallas_call(
+          kernel,
+          in_specs=[pl.BlockSpec((2, 512, 256), lambda i, j, k: (i, j, k)),],
+          out_specs=pl.BlockSpec((2, 512, 256), lambda i, j, k: (i, j, k)),
+          out_shape=jax.ShapeDtypeStruct(shape, jnp.float32),
+          grid=(4, 2, 3),
+          interpret=pltpu.InterpretParams(),
+      )(x)
+
+    y = f(x)
+    np.testing.assert_array_equal(y, x + 1.0)
+
   @parameterized.parameters('raise', 'uninitialized')
   def test_out_of_bounds_read_index(self, out_of_bounds_reads):
     def kernel(s_ref, x_ref, o_ref):
@@ -223,7 +249,7 @@ class InterpretTest(jtu.JaxTestCase):
           out_specs=pl.BlockSpec(memory_space=pltpu.SMEM),
           in_specs=[
               pl.BlockSpec(memory_space=pltpu.SMEM),
-              pl.BlockSpec(memory_space=pltpu.SMEM)
+              pl.BlockSpec(memory_space=pltpu.SMEM),
           ],
           interpret=pltpu.InterpretParams(
               out_of_bounds_reads=out_of_bounds_reads),
@@ -279,6 +305,156 @@ class InterpretTest(jtu.JaxTestCase):
       np.testing.assert_equal(np.array(out[:4]), 0.0)
       self.assertTrue(np.isnan(out[4:]).all())
 
+  @parameterized.product(
+      buffer_bounds=['logical', 'padded'],
+      out_of_bounds_reads=['raise', 'uninitialized'],
+      hbm_memory_space=[pltpu.HBM, pl.ANY],
+  )
+  def test_out_of_bounds_write_index(
+      self, buffer_bounds, out_of_bounds_reads, hbm_memory_space
+  ):
+    def kernel(x_ref, o_ref, s_ref):
+      # This write to `s_ref` tries to write to the portion [10, :]. This is
+      # logically out-of-bounds, but is in-bounds for a padded allocation of
+      # `s_ref` (which has shape (16, 128)).
+      pltpu.sync_copy(x_ref.at[0], s_ref.at[10])
+      # This read of `s_ref` is logically out-of-bounds, but we do not get here
+      # since the attemped (logical) out-of-bounds write above has already
+      # raised an exception. For a padded allocation of `s_ref`, this read is
+      # in-bounds, and we are expecting that it returns NaNs, and not the zeros
+      # that the write above has attempted to put into the padding portion.
+      o_ref[0, :] = s_ref[10, :]
+
+    @jax.jit
+    def run():
+      return pl.pallas_call(
+          kernel,
+          out_shape=jax.ShapeDtypeStruct((8, 128), jnp.float32),
+          out_specs=pl.BlockSpec(memory_space=pltpu.VMEM),
+          in_specs=[pl.BlockSpec(memory_space=hbm_memory_space)],
+          scratch_shapes=[pltpu.VMEM((10, 128), jnp.float32)],
+          interpret=pltpu.InterpretParams(
+              buffer_bounds=buffer_bounds,
+              out_of_bounds_reads=out_of_bounds_reads,
+          ),
+      )(jnp.zeros((8, 128), jnp.float32))
+
+    if buffer_bounds == 'logical':
+      if out_of_bounds_reads == 'raise':
+        with self.assertRaisesRegex(Exception, 'Out-of-bounds write'):
+          run().block_until_ready()
+      elif out_of_bounds_reads == 'uninitialized':
+        with self.assertRaisesRegex(Exception, 'Out-of-bounds write'):
+          run().block_until_ready()
+      pltpu.reset_tpu_interpret_mode_state()
+    elif buffer_bounds == 'padded':
+      abstract_mesh = jax.sharding.AbstractMesh(
+          (), (), abstract_device=jax.sharding.AbstractDevice('TPU v6e', 1, 'tpu')
+      )
+      with jax.sharding.use_abstract_mesh(abstract_mesh):
+        out = np.array(run().block_until_ready())
+        self.assertTrue(np.isnan(out).all())
+
+  @parameterized.product(
+      buffer_bounds=['logical', 'padded'],
+      out_of_bounds_reads=['raise', 'uninitialized'],
+      hbm_memory_space=[pltpu.HBM, pl.ANY],
+  )
+  def test_out_of_bounds_write_range(
+      self, buffer_bounds, out_of_bounds_reads, hbm_memory_space
+  ):
+    def kernel(x_ref, o_ref, s_ref):
+      # This write to `s_ref` tries to write to the portion [4:12, :]. Part of
+      # this portion is logically out-of-bounds; but this portion is fully
+      # in-bounds for a padded allocation of `s_ref` (with shape (16, 128)).
+      pltpu.sync_copy(x_ref, s_ref.at[pl.ds(jnp.int32(4), 8)])
+      # This read of `s_ref` is logically out-of-bounds. For a padded allocation
+      # of `s_ref`, this read is fully in-bounds, and we are expcting that it
+      # returns NaNs for the padding part of the allocation, i.e. for the
+      # portion [10:, :], and not the zeros that the write above has attempted
+      # to put into the padding portion.
+      o_ref[...] = s_ref[pl.ds(jnp.int32(4), 8)]
+
+    @jax.jit
+    def run():
+      return pl.pallas_call(
+          kernel,
+          out_shape=jax.ShapeDtypeStruct((8, 128), jnp.float32),
+          out_specs=pl.BlockSpec(memory_space=pltpu.VMEM),
+          in_specs=[pl.BlockSpec(memory_space=hbm_memory_space)],
+          scratch_shapes=[pltpu.VMEM((10, 128), jnp.float32)],
+          interpret=pltpu.InterpretParams(
+              out_of_bounds_reads=out_of_bounds_reads,
+              buffer_bounds=buffer_bounds,
+          ),
+      )(jnp.zeros((8, 128), jnp.float32))
+
+    if buffer_bounds == 'logical':
+      with self.assertRaisesRegex(Exception, 'Out-of-bounds write'):
+        run().block_until_ready()
+      pltpu.reset_tpu_interpret_mode_state()
+    elif buffer_bounds == 'padded':
+      abstract_mesh = jax.sharding.AbstractMesh(
+          (), (), abstract_device=jax.sharding.AbstractDevice('TPU v6e', 1, 'tpu')
+      )
+      with jax.sharding.use_abstract_mesh(abstract_mesh):
+        out = np.array(run().block_until_ready())
+        np.testing.assert_equal(out[:6], 0.0)
+        self.assertTrue(np.isnan(out[6:]).all())
+
+  @parameterized.product(
+      buffer_bounds=['logical', 'padded'],
+      memory_space=[pltpu.SMEM, pltpu.VMEM],
+  )
+  def test_smem_scratch_is_never_padded(self, buffer_bounds, memory_space):
+    def kernel(x_ref, o_ref, s_ref):
+      # This write to `s_ref` tries to write to the portion [10, :]. This is
+      # logically out-of-bounds for a scratch buffer with shape (10, 128).
+      # For VMEM with buffer_bounds='padded', the buffer is padded to (16, 128)
+      # so this write is in-bounds. For SMEM, the buffer is never padded
+      # (regardless of buffer_bounds), so this write is always out-of-bounds.
+      pltpu.sync_copy(x_ref.at[0], s_ref.at[10])
+      o_ref[0, :] = s_ref[10, :]
+
+    @jax.jit
+    def run():
+      return pl.pallas_call(
+          kernel,
+          out_shape=jax.ShapeDtypeStruct((8, 128), jnp.float32),
+          out_specs=pl.BlockSpec(memory_space=pltpu.VMEM),
+          in_specs=[pl.BlockSpec(memory_space=pltpu.VMEM)],
+          scratch_shapes=[memory_space((10, 128), jnp.float32)],
+          interpret=pltpu.InterpretParams(
+              buffer_bounds=buffer_bounds,
+              out_of_bounds_reads='raise',
+          ),
+      )(jnp.zeros((8, 128), jnp.float32))
+
+    if memory_space == pltpu.SMEM:
+      # SMEM is never padded, so writing at index 10 of a (10, 128) buffer
+      # is always out-of-bounds.
+      abstract_mesh = jax.sharding.AbstractMesh(
+          (), (), abstract_device=jax.sharding.AbstractDevice('TPU v6e', 1, 'tpu')
+      )
+      with jax.sharding.use_abstract_mesh(abstract_mesh):
+        with self.assertRaisesRegex(Exception, 'Out-of-bounds write'):
+          run().block_until_ready()
+        pltpu.reset_tpu_interpret_mode_state()
+    elif memory_space == pltpu.VMEM:
+      if buffer_bounds == 'padded':
+        # VMEM is padded to (16, 128), so the write at index 10 succeeds.
+        abstract_mesh = jax.sharding.AbstractMesh(
+            (), (), abstract_device=jax.sharding.AbstractDevice('TPU v6e', 1, 'tpu')
+        )
+        with jax.sharding.use_abstract_mesh(abstract_mesh):
+          out = np.array(run().block_until_ready())
+          self.assertTrue(np.isnan(out).all())
+      else:
+        with self.assertRaisesRegex(Exception, 'Out-of-bounds write'):
+          run().block_until_ready()
+        pltpu.reset_tpu_interpret_mode_state()
+
+
   def test_masked_store(self):
     def kernel(i_ref, j_ref, x_ref, mask_ref, o_ref):
       o_ref[...] = jnp.zeros(o_ref.shape, o_ref.dtype)
@@ -314,12 +490,50 @@ class InterpretTest(jtu.JaxTestCase):
         f(i, j, x, jnp.array(mask)).block_until_ready()
       pltpu.reset_tpu_interpret_mode_state()
 
+  def test_masked_store_to_padded_scratch_buffer(self):
+    def kernel(i_ref, j_ref, x_ref, mask_ref, o_ref, s_ref):
+      s_ref[...] = jnp.zeros(s_ref.shape, s_ref.dtype)
+      pltpu.store(
+          s_ref.at[pl.ds(pl.multiple_of(i_ref[0], 8), 8),
+                   pl.ds(pl.multiple_of(j_ref[0], 128), 128)],
+          x_ref[...],
+          mask=mask_ref[...])
+      o_ref[...] = s_ref[pl.ds(pl.multiple_of(i_ref[0], 8), 8),
+                         pl.ds(pl.multiple_of(j_ref[0], 128), 128)]
+
+    @jax.jit
+    def f(i, j, x, mask):
+      return pl.pallas_call(
+          kernel,
+          out_shape=jax.ShapeDtypeStruct((8, 128), jnp.float32),
+          scratch_shapes=[pltpu.VMEM((10, 150), jnp.float32)],
+          interpret=pltpu.InterpretParams(
+              buffer_bounds='padded', out_of_bounds_reads='uninitialized'
+          ),
+      )(i, j, x, mask)
+
+    i = jnp.array([8], jnp.int32)
+    j = jnp.array([128], jnp.int32)
+    x = jnp.ones((8, 128), dtype=jnp.float32)
+    mask = np.full((8, 128), True)
+
+    abstract_mesh = jax.sharding.AbstractMesh(
+        (), (), abstract_device=jax.sharding.AbstractDevice('TPU v6e', 1, 'tpu')
+    )
+    with jax.sharding.use_abstract_mesh(abstract_mesh):
+      out = f(i, j, x, jnp.array(mask)).block_until_ready()
+      np.testing.assert_array_equal(
+          out[:2, :22], jnp.ones((2, 22), dtype=jnp.float32)
+      )
+      self.assertTrue(np.isnan(out[2:, :]).all())
+      self.assertTrue(np.isnan(out[:, 22:]).all())
+
   def test_scalar_prefetch_example(self):
     def dynamic_slice_kernel(indices, x_ref, o_ref):
       del indices
       o_ref[...] = x_ref[...]
 
-    @functools.partial(jax.jit, static_argnums=(2,))
+    @jax.jit(static_argnums=(2,))
     def block_dynamic_slice(x, starts, sizes):
       grid_spec = pltpu.PrefetchScalarGridSpec(
           num_scalar_prefetch=1,
@@ -1391,8 +1605,7 @@ class InterpretTest(jtu.JaxTestCase):
           out_specs=pl.BlockSpec(memory_space=hbm_memory_space),
           in_specs=[pl.BlockSpec(memory_space=hbm_memory_space)],
           input_output_aliases={0: 0},
-          interpret=pltpu.InterpretParams(
-              uninitialized_memory='zero'),
+          interpret=pltpu.InterpretParams(uninitialized_memory='zero'),
       )(x)
 
     y = kernel_call(x)
@@ -1422,6 +1635,27 @@ class InterpretTest(jtu.JaxTestCase):
     x = jnp.zeros((8, 128), dtype=jnp.float32)
     y = f(x)
     self.assertArraysEqual(y, x + 1.0)
+
+  # TODO(nrink): This test is a bit different in style from the others in this
+  # file. (Other tests always exercise a Pallas kernel, this test here is a unit
+  # test of a utility function.) Consider moving this test to a separate (new)
+  # file, e.g. `third_party/py/jax/tests/pallas/tpu_interpret_utils_test.py`.
+  @parameterized.named_parameters(
+      ('in_bounds_int', (5,), (10,), False),
+      ('out_of_bounds_int', (10,), (10,), True),
+      ('in_bounds_slice_no_step', (slice(0, 10),), (10,), False),
+      ('out_of_bounds_slice_no_step', (slice(0, 11),), (10,), True),
+      ('in_bounds_slice_with_step', (slice(0, 10, 2),), (10,), False),
+      ('out_of_bounds_slice_with_step', (slice(0, 11, 2),), (10,), True),
+      ('strided_single_element_in_bounds', (slice(0, 10, 100),), (5,), False),
+      ('strided_single_element_out_of_bounds', (slice(5, 10, 100),), (5,), True),
+      ('zero_length_slice_in_bounds', (slice(5, 5, 1),), (10,), False),
+      ('zero_length_slice_out_of_bounds', (slice(15, 15, 1),), (10,), False),
+  )
+  def test_is_range_out_of_bounds_for_shape(self, rnge, shape, expected):
+    self.assertEqual(
+        interpret_utils.is_range_out_of_bounds_for_shape(rnge, shape), expected
+    )
 
 
 if __name__ == '__main__':

@@ -17,6 +17,7 @@
 from absl import app
 import jax
 from jax._src.interpreters import mlir
+from jax._src.lib import jaxlib_extension_version
 from jax._src.lib.mlir import ir
 from jax._src.lib.mlir import passmanager
 from jax._src.lib.mlir.dialects import func as func_dialect
@@ -70,8 +71,14 @@ def test_inlined_func_call():
 
     module = ir.Module.create(loc=ir.Location.unknown())
     ip = ir.InsertionPoint(module.body)
-    arg_types = [mlir.aval_to_ir_type(aval) for aval in arg_avals]
-    result_types = [mlir.aval_to_ir_type(aval) for aval in result_avals]
+    arg_types = [
+        ir.RankedTensorType.get(aval.shape, mlir.dtype_to_ir_type(aval.dtype))
+        for aval in arg_avals
+    ]
+    result_types = [
+        ir.RankedTensorType.get(aval.shape, mlir.dtype_to_ir_type(aval.dtype))
+        for aval in result_avals
+    ]
     ftype = ir.FunctionType.get(arg_types, result_types)
     callee = func_dialect.FuncOp("callee", ftype, ip=ip)
     callee.attributes["sym_visibility"] = ir.StringAttr.get("private")
@@ -89,7 +96,11 @@ def test_inlined_func_call():
     with ir.InsertionPoint(entry_block):
       x, y = entry_block.arguments
       with caller_loc:
-        x, y = _jax_mlir_ext.inlined_func_call(callee, [y, x], entry_block)
+        if jaxlib_extension_version >= 443:
+          x, y = _jax_mlir_ext.inlined_func_call(callee.operation, [y, x])
+        else:
+          x, y = _jax_mlir_ext.inlined_func_call(
+            callee, [y, x], ir.InsertionPoint.current.block)
       func_dialect.ReturnOp([x, y])
     module.operation.verify()
     pipeline = passmanager.PassManager.parse("builtin.module(symbol-dce)")
@@ -132,10 +143,28 @@ def test_traceback_to_location():
     loc = cache.get(tb)
     print(loc)
 
+def test_arith_constant():
+  # CHECK: --- test_arith_constant
+  print("--- test_arith_constant")
+  ctx = mlir.make_ir_context()
+  loc = ir.Location.unknown(context=ctx)
+  with ctx, loc:
+    module = ir.Module.create()
+    with ir.InsertionPoint(module.body):
+      # CHECK: arith.constant true
+      _jax_mlir_ext.arith_constant(True, ir.IntegerType.get_signless(1))
+      # CHECK: arith.constant 42 : i32
+      _jax_mlir_ext.arith_constant(42, ir.IntegerType.get_signless(32))
+      # CHECK: arith.constant 3.140000e+00 : f32
+      _jax_mlir_ext.arith_constant(3.14, ir.F32Type.get())
+    module.operation.verify()
+    print(module)
+
 
 def main(_):
   test_inlined_func_call()
   test_traceback_to_location()
+  test_arith_constant()
 
 
 if __name__ == "__main__":

@@ -76,10 +76,12 @@ class RaggedDotGpuPallasTest(jtu.JaxTestCase):
           )
           .as_text(dialect="stablehlo")
       )
+      # TODO(slebedev): Remove the latter branch once jaxlib is >0.10.0.
       if use_instruction:
-        self.assertIn("pallas_triton_ragged_dot", stablehlo_text)
+        self.assertTrue("pallas_triton_ragged_dot" in stablehlo_text or "triton_kernel_call_ffi" in stablehlo_text)
       else:
         self.assertNotIn("pallas_triton_ragged_dot", stablehlo_text)
+        self.assertNotIn("triton_kernel_call_ffi", stablehlo_text)
 
   @parameterized.named_parameters(
       dict(testcase_name="dlhs", grad_wrt="dlhs"),
@@ -109,6 +111,37 @@ class RaggedDotGpuPallasTest(jtu.JaxTestCase):
     )
     self.assertNotIn("stablehlo.transpose", stablehlo_text, msg)
     self.assertNotIn(" transpose(", hlo_text, msg)
+
+  @jtu.with_explicit_mesh((1,), ("x",))
+  def test_ragged_dot_explicit_out_sharding_errors(self, mesh):
+    del mesh  # Unused
+    args = [jnp.ones((16, 4)), jnp.ones((2, 4, 3)), jnp.array([8, 8])]
+
+    def f(lhs, rhs, gs):
+      return jax.lax.ragged_dot(lhs, rhs, gs, out_sharding=jax.P("x", None))
+
+    # Enable Pallas lowering
+    with config.jax_ragged_dot_use_gpu_pallas_triton_lowering(True):
+      with self.assertRaisesRegex(
+          NotImplementedError, "Explicit sharding is not currently supported"
+      ):
+        f(*args)
+
+  @jtu.with_explicit_mesh((1,), ("x",))
+  def test_ragged_dot_missing_out_sharding_errors(self, mesh):
+    # Put inputs on the mesh to make them sharded
+    lhs = jax.device_put(
+        jnp.ones((16, 4)), jax.NamedSharding(mesh, jax.P("x", None))
+    )
+    rhs = jnp.ones((2, 4, 3))
+    group_sizes = jnp.array([8, 8])
+
+    with self.assertRaisesRegex(
+        NotImplementedError,
+        "Explicit sharding inference for ragged_dot_general is not currently"
+        " implemented",
+    ):
+      jax.lax.ragged_dot(lhs, rhs, group_sizes)
 
 
 if __name__ == "__main__":

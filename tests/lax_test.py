@@ -39,6 +39,7 @@ from jax._src import config
 from jax._src import core
 from jax._src import dtypes
 from jax._src import lax_reference
+from jax._src import literals
 from jax._src import test_util as jtu
 from jax._src.errors import UnexpectedTracerError
 from jax._src.interpreters import mlir
@@ -200,6 +201,14 @@ class LaxTest(jtu.JaxTestCase):
   def testConvertElementTypeOOB(self):
     out = lax.convert_element_type(2 ** 32, 'int32')
     self.assertEqual(out, 0)
+
+  def testConvertElementTypeNanToInt(self):
+    # TODO(phawkins): raise a ValueError in the future
+    lax.convert_element_type(np.nan, np.int32)
+    lax.convert_element_type(jnp.bfloat16(np.nan), np.int32)
+    with jtu.ignore_warning(category=np.exceptions.ComplexWarning):
+      for re, im in [(np.nan, 0.0), (0.0, np.nan), (np.nan, np.nan)]:
+        lax.convert_element_type(complex(re, im), np.int32)
 
   @jtu.sample_product(
     [dict(from_dtype=from_dtype, to_dtype=to_dtype)
@@ -3847,8 +3856,6 @@ class LaxTest(jtu.JaxTestCase):
       jax.jacobian(f)(x, y)
 
   def test_dce_sink_prevents_xla_dce(self):
-    if jaxlib_extension_version < 438:
-      self.skipTest("Requires jaxlib extension version >= 438")
     if jtu.is_cloud_tpu_at_least(2026, 4, 17):
       self.skipTest('Requires nightly libtpu')
 
@@ -3869,6 +3876,13 @@ class LaxTest(jtu.JaxTestCase):
       return x
     hlo = jax.jit(g).lower(x).compile().as_text()
     self.assertNotIn("add", hlo)
+
+  @unittest.skipIf(jaxlib_extension_version < 441, "requires jaxlib 0.10.1")
+  def testStagePreservesWeakType(self):
+    aval = core.ShapedArray((), np.float32, weak_type=True)
+    x = literals.TypedNdArray(np.array(1.0, dtype=np.float32), aval=aval)
+    y = lax_internal.stage(x)
+    self.assertTrue(dtypes.is_weakly_typed(y))
 
 
 class LazyConstantTest(jtu.JaxTestCase):
@@ -5004,6 +5018,7 @@ class CompositeTest(jtu.JaxTestCase):
       grad(my_square)(1.0)
 
   def test_composite_with_array_consts(self):
+    self.enter_context(config.embedded_constants_max_bytes(4))
     @partial(lax.composite, name="my.consts")
     def my_consts(x, /, *, scale):
       return jnp.round(x / scale)
@@ -5042,6 +5057,12 @@ class CompositeTest(jtu.JaxTestCase):
 
 
 class RaggedTest(jtu.JaxTestCase):
+
+  def check_wsc_in_lowered(self, text):
+    if config.use_shardy_partitioner.value:
+      self.assertIn('sdy.sharding_constraint', text)
+    else:
+      self.assertIn('@Sharding', text)
 
   def _test_ragged_dot(self, m, k, n, num_groups, dtype):
     """Tests ragged_dot.
@@ -5100,6 +5121,34 @@ class RaggedTest(jtu.JaxTestCase):
             )
             .as_text(dialect="stablehlo"),
         )
+
+  @unittest.skipIf(jaxlib_extension_version < 441,
+                   "Requires jaxlib_extension_version >= 441")
+  def test_ragged_dot_general_preserves_named_scope(self):
+    if not jtu.test_device_matches(["tpu"]):
+      raise unittest.SkipTest("Test only runs on TPU")
+    if not jtu.is_cloud_tpu_at_least(2026, 4, 23):
+      raise unittest.SkipTest("Requires a newer libtpu")
+
+
+    m, k, n = (8, 8, 8)
+    num_groups = 2
+    group_size = m // num_groups
+
+    lhs = jnp.ones((m, k), dtype=jnp.float32)
+    rhs = jnp.ones((num_groups, k, n), dtype=jnp.float32)
+    group_sizes = jnp.full((num_groups,), group_size, dtype=jnp.int32)
+
+    def run_bench():
+      with jax.named_scope("ragged_dot_test_outer"):
+        with jax.named_scope("ragged_dot_test_inner"):
+          return jax.lax.ragged_dot(lhs, rhs, group_sizes)
+
+    lowered = jax.jit(run_bench).trace().lower()
+    compiled_text = lowered.compile().as_text()
+    self.assertIsNotNone(compiled_text, "Compiled text should not be None")
+    self.assertIn("ragged_dot_test_outer", compiled_text)
+    self.assertIn("ragged_dot_test_inner", compiled_text)
 
   @parameterized.parameters(
       {"m": 5, "k": 4, "n": 3, "num_groups": 1},
@@ -5354,6 +5403,7 @@ class RaggedTest(jtu.JaxTestCase):
           lhs, rhs, group_sizes, ragged_dot_dimension_numbers=ragged_dnums,
           precision=jax.lax.Precision.DEFAULT,
           preferred_element_type=jnp.float32,
+          group_offset=None, out_sharding=None,
       )
     else:
       actual_shape = lax.ragged_dot_general(
@@ -5363,9 +5413,9 @@ class RaggedTest(jtu.JaxTestCase):
 
   @parameterized.product(
       batch_size=[3, 5],
-      m=[128, 1024],
-      k=[128, 1024],
-      n=[128, 1024],
+      m=[128, 256],
+      k=[128, 256],
+      n=[128, 256],
       num_groups=[2, 4],
   )
   def test_ragged_dot_general_vmap(
@@ -5412,6 +5462,50 @@ class RaggedTest(jtu.JaxTestCase):
       self.assertArraysAllClose(
           batch_res[i, 0:upper_bound, :], ref_res, rtol=tol, atol=tol
       )
+
+  @jtu.with_explicit_mesh((1,), ("x",))
+  def test_ragged_dot_out_sharding(self, mesh):
+    args = [jnp.ones((16, 4)), jnp.ones((2, 4, 3)), jnp.array([8, 8])]
+
+    def f(lhs, rhs, gs):
+      out = lax.ragged_dot(lhs, rhs, gs, out_sharding=jax.P("x", None))
+      self.assertEqual(jax.typeof(out).sharding.spec, jax.P("x", None))
+      return out
+
+    # Eager mode
+    out = f(*args)
+    self.assertEqual(out.sharding, jax.NamedSharding(mesh, jax.P("x", None)))
+
+    # JIT mode
+    f_jit = jax.jit(f)
+    out = f_jit(*args)
+    self.assertEqual(out.sharding, jax.NamedSharding(mesh, jax.P("x", None)))
+
+    # HLO lowering
+    self.check_wsc_in_lowered(f_jit.lower(*args).as_text())
+
+  @jtu.with_explicit_mesh((1,), ("x",))
+  def test_ragged_dot_general_out_sharding(self, mesh):
+    args = [jnp.ones((16, 4)), jnp.ones((2, 4, 3)), jnp.array([8, 8])]
+    dnums = lax.RaggedDotDimensionNumbers((([1], [1]), ([], [])), [0], [0])
+
+    def f(lhs, rhs, gs):
+      out = lax.ragged_dot_general(lhs, rhs, gs, dnums,
+                                   out_sharding=jax.P("x", None))
+      self.assertEqual(jax.typeof(out).sharding.spec, jax.P("x", None))
+      return out
+
+    # Eager mode
+    out = f(*args)
+    self.assertEqual(out.sharding, jax.NamedSharding(mesh, jax.P("x", None)))
+
+    # JIT mode
+    f_jit = jax.jit(f)
+    out = f_jit(*args)
+    self.assertEqual(out.sharding, jax.NamedSharding(mesh, jax.P("x", None)))
+
+    # HLO lowering
+    self.check_wsc_in_lowered(f_jit.lower(*args).as_text())
 
 class LaxUtilsTest(jtu.JaxTestCase):
 

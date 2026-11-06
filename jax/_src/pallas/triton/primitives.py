@@ -147,14 +147,16 @@ def _elementwise_inline_asm_lowering(
           " supported on ROCm"
       )
 
-  return tt_dialect.ElementwiseInlineAsmOp(
-      [*map(mlir.aval_to_ir_type, ctx.avals_out)],
-      asm,
-      constraints=constraints,
-      pure=True,
-      packed_element=pack,
-      args=args,
-  ).result
+  return [
+      tt_dialect.elementwise_inline_asm(
+          [mlir.aval_to_ir_type(ctx.context.mlir_ctx, aval) for aval in ctx.avals_out],
+          asm,
+          constraints=constraints,
+          pure=True,
+          packed_element=pack,
+          args=args,
+      )
+  ]
 
 
 def _approx_tanh_rocm_lowering(
@@ -171,7 +173,7 @@ def _approx_tanh_rocm_lowering(
   in_dtype = ctx.avals_in[0].dtype
 
   if in_dtype == jnp.float64:
-    result_type = mlir.aval_to_ir_type(out_aval)
+    result_type = mlir.aval_to_ir_type(ctx.context.mlir_ctx, out_aval)
     result = tt_dialect.extern_elementwise(
         result_type,
         list(args),
@@ -192,7 +194,7 @@ def _approx_tanh_rocm_lowering(
       result_type = f32_type
     arg = arith_dialect.extf(result_type, arg)
   else:
-    result_type = mlir.aval_to_ir_type(out_aval)
+    result_type = mlir.aval_to_ir_type(ctx.context.mlir_ctx, out_aval)
   result = tt_dialect.extern_elementwise(
       result_type,
       [arg],
@@ -203,7 +205,7 @@ def _approx_tanh_rocm_lowering(
   )
 
   if needs_cast:
-    out_type = mlir.aval_to_ir_type(out_aval)
+    out_type = mlir.aval_to_ir_type(ctx.context.mlir_ctx, out_aval)
     result = arith_dialect.truncf(out_type, result)
 
   return [result]
@@ -700,6 +702,6 @@ def _max_contiguous_rule(
   lowering._set_attr(
       x,
       "tt.contiguity",
-      ir.DenseIntElementsAttr.get(np.asarray(values, dtype=np.int32)),  # pyrefly: ignore[no-matching-overload]
+      ir.DenseIntElementsAttr.get(np.asarray(values, dtype=np.int32)),
   )
   return x

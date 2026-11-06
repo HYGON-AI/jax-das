@@ -21,6 +21,7 @@ from contextlib import contextmanager
 import dataclasses
 import enum
 import functools
+import math
 from typing import Any, Literal, Union
 
 import jax
@@ -58,24 +59,6 @@ PipelineBlockSpecs = Union[Sequence[pallas_core.BlockSpec], Any]
 PipelineRefs = Union[Sequence[REF], Any]
 
 
-def _round_up_to_nearest_multiple(
-    s: int | jax.Array, multiple: int
-) -> int | jax.Array:
-  if isinstance(s, int) and s % multiple == 0:
-    return s
-  # Subtract off the remainder, then add multiple
-  return s - s % multiple + multiple
-
-
-def _make_block_ds(
-    idx: jax.Array | int, size: jax.Array | int
-) -> pl.Slice:
-  """Make a DMA slice with mosaic size hints."""
-  out = pl.ds(idx * size, size)
-  assert isinstance(out, pl.Slice)
-  return out
-
-
 def _create_blocked_slice(
     block_index: jax.Array | int,
     block_size: int,
@@ -92,9 +75,7 @@ def _create_blocked_slice(
   num_blocks = pl.cdiv(dim_size, block_size)
   is_last = block_index == num_blocks - 1
   rounded_size = jnp.where(
-      is_last,
-      _round_up_to_nearest_multiple(dim_rem % block_size, tiling),
-      block_size,
+      is_last, pl.align_to(dim_rem % block_size, tiling), block_size
   )
   rounded_size = pl.multiple_of(rounded_size, tiling)
   return pl.ds(block_index * block_size, rounded_size)
@@ -117,11 +98,7 @@ def _create_bounded_slice(slice_start: jax.Array | int,
   # multiple of the tiling.
   is_oob = slice_start + slice_size > dim_size
   remaining = dim_size - slice_start
-  rounded_size = jnp.where(
-      is_oob,
-      _round_up_to_nearest_multiple(remaining, tiling),
-      slice_size,
-  )
+  rounded_size = jnp.where(is_oob, pl.align_to(remaining, tiling), slice_size)
   rounded_size = pl.multiple_of(rounded_size, tiling)
   return pl.ds(slice_start, rounded_size)
 
@@ -157,7 +134,7 @@ def _make_block_slice(
       return _create_bounded_slice(
           slice_start, slice_size, block_size, size, tiling
       )
-    case None | pl.Squeezed():
+    case None | pl.Squeezed() | pl.Indirect():
       return block_index
     case _:
       raise ValueError(f"Unsupported block dimension type: {block_size}")
@@ -176,14 +153,6 @@ def _tuple_all_binop(binop, xs, ys):
 _tuple_lt = functools.partial(_tuple_all_binop, lambda x, y: x < y)
 
 
-def _grid_size(grid):
-  """Dynamic grid size calculation."""
-  size = jnp.array(1, jnp.int32)
-  for dim in grid:
-    size *= dim
-  return size
-
-
 def _spec_has_trivial_windowing(spec, grid, full_shape):
   if spec is None:
     return True
@@ -192,7 +161,10 @@ def _spec_has_trivial_windowing(spec, grid, full_shape):
   for bs, fs in zip(spec.block_shape, full_shape):
     if bs is None:
       return False
-    if isinstance(bs, (pallas_core.BoundedSlice, pl.Squeezed, pl.Element)):
+    if isinstance(
+        bs,
+        (pl.BoundedSlice, pl.Indirect, pl.Squeezed, pl.Element),
+    ):
       return False
     if pallas_core.get_block_size(bs) != fs:
       return False
@@ -248,16 +220,17 @@ def _get_block_shape(spec: pl.BlockSpec) -> tuple[int, ...]:
   """Get the block shape for a given block spec."""
   def _get_dim_size(bd):
     match bd:
-      case pl.Blocked(block_size):
-        return block_size
-      case pl.Element(block_size):
-        return block_size
-      case pl.BoundedSlice(block_size):
-        return block_size
       case int():
         return bd
       case None | pl.Squeezed():
         return None
+      case (
+          pl.Blocked(block_size)
+          | pl.Element(block_size)
+          | pl.BoundedSlice(block_size)
+          | pl.Indirect(block_size)
+      ):
+        return block_size
       case _:
         raise ValueError(f"Unsupported block dimension type: {bd}")
   if spec.block_shape is None:
@@ -333,6 +306,13 @@ class BufferedRefBase:
   @property
   def block_shape(self) -> Sequence[pl.BlockDim | int | None] | None:
     return self.spec.block_shape
+
+  @property
+  def has_indirect(self) -> bool:
+    """Whether any block dimension uses indirect indexing."""
+    if self.block_shape is None:
+      return False
+    return any(isinstance(bd, pl.Indirect) for bd in self.block_shape)
 
   @property
   def has_allocated_buffer(self) -> bool:
@@ -657,7 +637,7 @@ class BufferedRef(BufferedRefBase):
       copy_out_slot: int | jax.Array | None = None,
       wait_in_slot: int | jax.Array | None = None,
       wait_out_slot: int | jax.Array | None = None,
-  ) -> "BufferedRef":
+  ) -> BufferedRef:
     """Returns a new BufferedRef with the given slot index."""
     new_buf = self
     if copy_in_slot is not None:
@@ -773,14 +753,14 @@ class BufferedRef(BufferedRefBase):
               "BoundedSlice block dimensions are not supported."
           )
         case pl.Blocked(block_size):
-          indexer.append(_make_block_ds(idx, block_size))
+          indexer.append(pl.ds(idx * block_size, block_size))
         case int():
-          indexer.append(_make_block_ds(idx, bd))
+          indexer.append(pl.ds(idx * bd, bd))
         case _:
           raise ValueError(f"Unsupported block dimension type: {type(bd)}")
     return tuple(indexer)
 
-  def initialize_slots(self) -> "BufferedRef":
+  def initialize_slots(self) -> BufferedRef:
     return dataclasses.replace(
         self,
         copy_in_slot=jnp.uint32(0) if self.buffer_type.is_input else None,
@@ -794,14 +774,14 @@ class BufferedRef(BufferedRefBase):
         ),
     )
 
-  def _advance_slot(self, reg_slot, slot_kwarg, predicate) -> "BufferedRef":
+  def _advance_slot(self, reg_slot, slot_kwarg, predicate) -> BufferedRef:
     assert reg_slot is not None
     new_current_slot = lax.select(predicate, reg_slot + 1, reg_slot)
     return self.with_slot_index(**{slot_kwarg: new_current_slot})
 
   def advance_copy_in_slot(
       self, predicate: bool | jax.Array = True
-  ) -> "BufferedRef":
+  ) -> BufferedRef:
     """Switch to the next copy slot."""
     if not self.is_buffered or not self.is_input:
       return self
@@ -809,7 +789,7 @@ class BufferedRef(BufferedRefBase):
 
   def advance_wait_in_slot(
       self, predicate: bool | jax.Array = True
-  ) -> "BufferedRef":
+  ) -> BufferedRef:
     """Switch to the next wait slot."""
     if not self.is_buffered or not self.is_input:
       return self
@@ -817,7 +797,7 @@ class BufferedRef(BufferedRefBase):
 
   def advance_copy_out_slot(
       self, predicate: bool | jax.Array = True
-  ) -> "BufferedRef":
+  ) -> BufferedRef:
     """Switch to the next copy slot."""
     if not self.is_buffered or not self.is_output:
       return self
@@ -825,7 +805,7 @@ class BufferedRef(BufferedRefBase):
 
   def advance_wait_out_slot(
       self, predicate: bool | jax.Array = True
-  ) -> "BufferedRef":
+  ) -> BufferedRef:
     """Switch to the next wait slot."""
     if not self.is_buffered or not self.is_output:
       return self
@@ -869,11 +849,17 @@ class BufferedRef(BufferedRefBase):
     slot = self.current_copy_out_slot
     dst_slice = self.get_dma_slice(_ref_to_value_aval(dst_ref), grid_indices)
     src_slice = self._to_window_slice(dst_slice)
-    tpu_primitives.make_async_copy(
-        self._window_ref_at(slot, src_slice),
-        dst_ref.at[dst_slice],
-        self.sem_sends.at[slot],
-    ).start()
+    if self.buffer_count == 1:
+      tpu_helpers.sync_copy(
+          self._window_ref_at(slot, src_slice),
+          dst_ref.at[dst_slice],
+      )
+    else:
+      tpu_primitives.make_async_copy(
+          self._window_ref_at(slot, src_slice),
+          dst_ref.at[dst_slice],
+          self.sem_sends.at[slot],
+      ).start()
 
   def wait_in(self, src_ref, grid_indices):
     """Waits for input copy to finish."""
@@ -901,11 +887,13 @@ class BufferedRef(BufferedRefBase):
     wait_slot = self.current_wait_out_slot
     dst_slice = self.get_dma_slice(_ref_to_value_aval(dst_ref), grid_indices)
     src_slice = self._to_window_slice(dst_slice)
-    tpu_primitives.make_async_copy(
-        self._window_ref_at(wait_slot, src_slice),  # nb: doesn't matter
-        dst_ref.at[dst_slice],  # only dst shape is important
-        self.sem_sends.at[wait_slot],
-    ).wait()
+    # Single-buffered outputs are synchronously copied.
+    if self.buffer_count > 1:
+      tpu_primitives.make_async_copy(
+          self._window_ref_at(wait_slot, src_slice),  # nb: doesn't matter
+          dst_ref.at[dst_slice],  # only dst shape is important
+          self.sem_sends.at[wait_slot],
+      ).wait()
 
 
 def fetch_with_lookahead(buffered_ref, src_ref,
@@ -1091,7 +1079,7 @@ class Scheduler:
     self._explicit_indices = _explicit_indices
 
     # Total number of linear steps.
-    self.num_steps = _grid_size(grid)
+    self.num_steps = math.prod(grid)
 
     # First and last inner step conditionals.
     self.first_step = step == 0
@@ -1151,6 +1139,8 @@ class Scheduler:
   def has_changed(self, buffered_ref):
     if not buffered_ref.is_buffered or buffered_ref.is_trivial_windowing:
       return False
+    if buffered_ref.has_indirect:
+      return True
     indices = buffered_ref.compute_index(*self.indices)
     prev_indices = buffered_ref.compute_index(*self.prev_indices)
     return _tuples_differ(indices, prev_indices)
@@ -1158,6 +1148,8 @@ class Scheduler:
   def will_change_current(self, buffered_ref):
     if not buffered_ref.is_buffered or buffered_ref.is_trivial_windowing:
       return False
+    if buffered_ref.has_indirect:
+      return True
     indices = buffered_ref.compute_index(*self.indices)
     next_indices = buffered_ref.compute_index(*self.next_indices)
     return _tuples_differ(indices, next_indices)
@@ -1165,6 +1157,8 @@ class Scheduler:
   def will_change_fetch(self, buffered_ref):
     if not buffered_ref.is_buffered or buffered_ref.is_trivial_windowing:
       return False
+    if buffered_ref.has_indirect:
+      return True
     if buffered_ref.buffer_count < 2:
       return self.has_changed(buffered_ref)
     indices = buffered_ref.compute_index(
@@ -1231,7 +1225,7 @@ class Scheduler:
         buffered_ref = buffered_ref.advance_copy_in_slot(predicate)
     return buffered_ref
 
-  def wait_in(self, buffered_ref, src_ref) -> "BufferedRef":
+  def wait_in(self, buffered_ref, src_ref) -> BufferedRef:
     if buffered_ref.is_trivial_windowing:
       return buffered_ref
     pred = self.has_changed(buffered_ref) | self.first_step
@@ -1243,7 +1237,7 @@ class Scheduler:
         buffered_ref.wait_in(src_ref, self.indices)
     return buffered_ref
 
-  def copy_in(self, buffered_ref, src_ref) -> "BufferedRef":
+  def copy_in(self, buffered_ref, src_ref) -> BufferedRef:
     if buffered_ref.is_trivial_windowing:
       return buffered_ref
     pred = (self.will_change_fetch(buffered_ref) &
@@ -1271,7 +1265,7 @@ class Scheduler:
           pred & buffered_ref.is_input)
     return buffered_ref
 
-  def wait_out(self, buffered_ref, dst_ref) -> "BufferedRef":
+  def wait_out(self, buffered_ref, dst_ref) -> BufferedRef:
     if buffered_ref.is_trivial_windowing:
       return buffered_ref
     pred = self.has_changed(buffered_ref) & ~self.first_step
@@ -1288,7 +1282,7 @@ class Scheduler:
         buffered_ref.wait_out(dst_ref, self.prev_indices)
     return buffered_ref.advance_wait_out_slot(pred & buffered_ref.is_output)
 
-  def copy_out(self, buffered_ref, dst_ref) -> "BufferedRef":
+  def copy_out(self, buffered_ref, dst_ref) -> BufferedRef:
     if buffered_ref.is_trivial_windowing:
       return buffered_ref
     pred = self.will_change_current(buffered_ref) | self.last_step
@@ -1602,7 +1596,7 @@ def emit_pipeline(
   core_axis_ = core_axis_name if core_axis is None else core_axis
   grid, grid_offsets = _partition_grid(grid, core_axis_, dimension_semantics)
 
-  num_steps = _grid_size(grid)
+  num_steps = math.prod(grid)
   in_specs = _normalize_specs(in_specs)
   out_specs = _normalize_specs(out_specs)
   get_buffer_count = lambda spec: (spec.pipeline_mode.buffer_count if

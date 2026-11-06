@@ -36,7 +36,7 @@ source "ci/utilities/setup_build_environment.sh"
 
 OVERRIDE_XLA_REPO=""
 if [[ "$JAXCI_CLONE_MAIN_XLA" == 1 ]]; then
-  OVERRIDE_XLA_REPO="--override_repository=xla=${JAXCI_XLA_GIT_DIR}"
+  OVERRIDE_XLA_REPO="--override_repository=xla=${JAXCI_XLA_GIT_DIR} --override_module=xla=${JAXCI_XLA_GIT_DIR}"
 fi
 
 # Run Bazel GPU tests with RBE (single accelerator tests with one GPU apiece).
@@ -98,7 +98,10 @@ for arg in "$@"; do
     fi
 done
 
+TEST_ARTIFACTS_DIR="test-artifacts"
+mkdir -p "$TEST_ARTIFACTS_DIR"
 bazel --bazelrc=build/rocm/rocm.bazelrc test \
+    --profile="$TEST_ARTIFACTS_DIR/bazel_profile.json.gz" \
     --config=rocm \
     --config=rocm_rbe_dynamic \
     $OVERRIDE_XLA_REPO \
@@ -122,5 +125,5 @@ bazel --bazelrc=build/rocm/rocm.bazelrc test \
     //jaxlib/tools:check_gpu_wheel_sources_test \
     "${TESTS_TO_IGNORE[@]}"
 
-ci/utilities/collect_bazel_test_xmls.sh test-artifacts
+ci/utilities/collect_bazel_test_xmls.sh "$TEST_ARTIFACTS_DIR"
 exit "${bazel_retval:-0}"

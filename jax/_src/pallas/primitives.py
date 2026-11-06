@@ -173,20 +173,21 @@ def _load_pp_rule(eqn, context, settings):
   # TODO(sharadmv): pretty print mask and other
   annotation = (source_info_util.summarize(eqn.source_info)
                 if settings.source_info else None)
-  lhs = jax_core.pp_vars([y], context, print_shapes=settings.print_shapes)
+  lhs = jax_core.pp_vars([y], context, print_shapes=settings.print_shapes,
+                         is_binder=True)
   result = [lhs, pp.text(" <- ", annotation=annotation),
             sp.pp_ref_transforms(context, x, transforms)]
   if mask is not None:
     result += [
         pp.text(" "),
         pp.text("mask="),
-        pp.text(jax_core.pp_var(mask, context)),
+        jax_core.pp_var(mask, context),
     ]
   if other is not None:
     result += [
         pp.text(" "),
         pp.text("other="),
-        pp.text(jax_core.pp_var(other, context)),
+        jax_core.pp_var(other, context),
     ]
   return pp.concat(result)
 jax_core.pp_eqn_rules[load_p] = _load_pp_rule
@@ -341,8 +342,9 @@ def _swap_pp_rule(eqn, context, settings):
     return pp.concat([
         x_i,
         pp.text(" <- ", annotation=annotation),
-        pp.text(jax_core.pp_var(val, context))])
-  y = jax_core.pp_vars([y], context, print_shapes=settings.print_shapes)
+        jax_core.pp_var(val, context)])
+  y = jax_core.pp_vars([y], context, print_shapes=settings.print_shapes,
+                       is_binder=True)
   result = [
       y,
       pp.text(", "),
@@ -350,13 +352,13 @@ def _swap_pp_rule(eqn, context, settings):
       pp.text(" <- ", annotation=annotation),
       x_i,
       pp.text(", "),
-      pp.text(jax_core.pp_var(val, context)),
+      jax_core.pp_var(val, context),
   ]
   if mask is not None:
     result += [
         pp.text(" "),
         pp.text("mask="),
-        pp.text(jax_core.pp_var(mask, context)),
+        jax_core.pp_var(mask, context),
     ]
   return pp.concat(result)
 jax_core.pp_eqn_rules[swap_p] = _swap_pp_rule
@@ -1033,6 +1035,32 @@ def _semaphore_signal_abstract_eval(
       effs.add(pallas_core.comms_effect)
   return [], effs
 
+
+def _pp_device_id(device_id, context):
+  if device_id is None:
+    return pp.text("None")
+  elif isinstance(device_id, dict):
+    items = []
+    for k, v in device_id.items():
+      item = pp.concat([pp.text(f"{k}: "), _pp_device_id(v, context)])
+      items.append(item)
+    return pp.concat(
+        [pp.text("{"), pp.join(pp.text(", "), items), pp.text("}")]
+    )
+  elif isinstance(device_id, tuple):
+    items = [_pp_device_id(v, context) for v in device_id]
+    return pp.concat(
+        [pp.text("("), pp.join(pp.text(", "), items), pp.text(")")]
+    )
+  elif isinstance(device_id, list):
+    items = [_pp_device_id(v, context) for v in device_id]
+    return pp.concat(
+        [pp.text("["), pp.join(pp.text(", "), items), pp.text("]")]
+    )
+  else:
+    return jax_core.pp_var(device_id, context)
+
+
 def _semaphore_signal_pp_eqn(eqn: jax_core.JaxprEqn,
                              context: jax_core.JaxprPpContext,
                              settings: jax_core.JaxprPpSettings):
@@ -1051,18 +1079,15 @@ def _semaphore_signal_pp_eqn(eqn: jax_core.JaxprEqn,
       pp.text(" "),
       sp.pp_ref_transforms(context, sem, sem_transforms),
       pp.text(" "),
-      pp.text(jax_core.pp_var(value, context)),
+      jax_core.pp_var(value, context),
   ])
   if device_ids is not None:
     flat_device_ids = tree_util.tree_leaves(device_ids)
     if not flat_device_ids:
       return out
-    device_ids_pp = [pp.text(jax_core.pp_var(flat_device_ids[0], context))]
-    for device_id in flat_device_ids[1:]:
-      device_ids_pp.append(pp.text(" "))
-      device_ids_pp.append(pp.text(jax_core.pp_var(device_id, context)))
-    out = pp.concat([out, pp.concat(device_ids_pp)])
+    out = pp.concat([out, pp.text(" "), _pp_device_id(device_ids, context)])
   return out
+
 jax_core.pp_eqn_rules[semaphore_signal_p] = _semaphore_signal_pp_eqn
 
 
@@ -1140,7 +1165,7 @@ def _semaphore_wait_pp_eqn(eqn: jax_core.JaxprEqn,
       pp.text(" "),
       sp.pp_ref_transforms(context, sem, sem_transforms),
       pp.text(" "),
-      pp.text(jax_core.pp_var(value, context)),
+      jax_core.pp_var(value, context),
   ]
   return pp.concat(parts)
 jax_core.pp_eqn_rules[semaphore_wait_p] = _semaphore_wait_pp_eqn

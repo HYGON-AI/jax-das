@@ -201,7 +201,7 @@ def _gpu_ragged_dot_kernel(
     loops.fori_loop(0, cdiv(size.m - last_offset, block.m), set_zero, None)
 
 
-@partial(api.jit, static_argnums=list(range(3, 14)))
+@api.jit(static_argnums=list(range(3, 14)))
 def gmm(
   x: Array,  # [m, k]
   A: Array,  # [g, k, n]
@@ -234,10 +234,10 @@ def gmm(
   size = RaggedDotSizes(m=x.shape[0], k=x.shape[1], n=n, g=A.shape[0])
 
   # normalize the block sizes for GPU
-  block_m, block_k, block_n = [
+  block_m, block_k, block_n = (
     pl.next_power_of_2(min(b, s))
     for b, s in zip([block_m, block_k, block_n], [size.m, size.k, size.n])
-  ]
+  )
   block_k, block_n = max(block_k, 16), max(block_n, 16)
 
   A_spec = pl.BlockSpec((size.g, size.k, block_n), lambda i, j: (0, 0, j))
@@ -346,7 +346,7 @@ def _tgmm_ragged_dot_kernel(
                 mask=rmask[:, None] & cmask[None, :])
 
 
-@partial(api.jit, static_argnums=list(range(3, 13)))
+@api.jit(static_argnums=list(range(3, 13)))
 def tgmm(
   x: Array,  # [m, k]
   y: Array,  # [m, n]
@@ -373,10 +373,10 @@ def tgmm(
   block_m, block_n = min(block_m, m), min(block_n, n)
 
   # normalize the block sizes for GPU
-  block_m, block_k, block_n = [
+  block_m, block_k, block_n = (
     max(pl.next_power_of_2(min(b, s)), 16)
     for b, s in zip([block_m, block_k, block_n], [size.m, size.k, size.n])
-  ]
+  )
 
   group_offsets = reductions.cumsum(group_sizes) - group_sizes
   in_specs = [
@@ -453,8 +453,12 @@ def _pallas_ragged_dot_general_impl(
                                           # precision parameter in the kernels.
     preferred_element_type: DTypeLike | None = None,
     group_offset: Array | None = None,
+    out_sharding=None,
 ) -> Array:
-
+  if out_sharding is not None:
+    raise NotImplementedError(
+      "Explicit sharding is not currently supported in the pallas-triton"
+      " lowering of ragged_dot_general. You can call this op under shard_map.")
 
   if group_offset is not None:
     raise NotImplementedError("group_offset is not currently supported in the "
@@ -508,7 +512,6 @@ def _pallas_ragged_dot_general_impl(
           rd2s(r_batch) + (rags(rhs_group_dims), rags(c_or_nc), rags(nc_or_c))
       )
 
-
       # batch dimensions are handled by vmap
       fn = compose_vmap(
           partial(gmm, trans_rhs=trans_rhs, **ragged_dot_opts), len(l_batch)
@@ -520,6 +523,7 @@ def _pallas_ragged_dot_general_impl(
       out = out.reshape(
           ld2s(l_batch) + ld2s(l_noncontract) + rd2s(r_noncontract)
       )
+      # TODO(rdyro): When out_sharding is supported, ensure proper sharding.
       return out
     case lax.RaggedDotMode.RAGGED_CONTRACTING:
       r_noncontract = tuple(lax.remaining(range(rhs.ndim), r_contract, r_batch))
@@ -557,6 +561,7 @@ def _pallas_ragged_dot_general_impl(
                   + out_perm[:batch_ndims]
                   + out_perm[batch_ndims+groups_ndims:])
       out = out.transpose(out_perm)
+      # TODO(rdyro): When out_sharding is supported, ensure proper sharding.
       return out
     case lax.RaggedDotMode.RAGGED_BATCH:
       return lax.dot_general(
@@ -565,4 +570,5 @@ def _pallas_ragged_dot_general_impl(
           dimension_numbers=ragged_dot_dimension_numbers.dot_dimension_numbers,
           precision=precision,
           preferred_element_type=preferred_element_type,
+          out_sharding=out_sharding,
       )

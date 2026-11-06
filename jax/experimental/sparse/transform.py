@@ -84,6 +84,7 @@ _zero_preserving_linear_unary_primitives = [
   lax.imag_p,
   lax.neg_p,
   lax.real_p,
+  core.stage_p,
 ]
 
 _zero_preserving_unary_primitives = [
@@ -313,6 +314,12 @@ class SparseTrace(core.Trace):
       with core.set_current_trace(self.parent_trace):
         spvalue, = arrays_to_spvalues(self.spenv, [val])
       return SparseTracer(self, spvalue=spvalue)
+
+  def stage_value(self, val):
+    if isinstance(val, SparseTracer) and self.tag is val._trace.tag:
+      return val
+    staged_val = self.parent_trace.stage_value(val)
+    return self.to_sparse_tracer(staged_val)
 
   def process_primitive(self, primitive, tracers, params, /):
     tracers = [self.to_sparse_tracer(t) for t in tracers]
@@ -612,6 +619,29 @@ def _transpose_sparse(spenv, *spvalues, permutation):
   return (spvalue,)
 
 sparse_rules_bcoo[lax.transpose_p] = _transpose_sparse
+
+def _stack_sparse(spenv, *spvalues, axis, broadcast_in_dim, concatenate):
+  arrays = spvalues_to_arrays(spenv, spvalues)
+  base_shape = arrays[0].shape
+  new_shape = base_shape[:axis] + (1,) + base_shape[axis:]
+  bdims = [d if d < axis else d + 1 for d in range(arrays[0].ndim)]
+  expanded = [
+    broadcast_in_dim(x, shape=new_shape, broadcast_dimensions=bdims)
+    for x in arrays
+  ]
+  return arrays_to_spvalues(spenv, [concatenate(expanded, dimension=axis)])
+
+sparse_rules_bcoo[lax.stack_p] = functools.partial(
+    _stack_sparse,
+    broadcast_in_dim=sparse.bcoo_broadcast_in_dim,
+    concatenate=sparse.bcoo_concatenate,
+)
+sparse_rules_bcsr[lax.stack_p] = functools.partial(
+    _stack_sparse,
+    broadcast_in_dim=sparse.bcsr_broadcast_in_dim,
+    concatenate=sparse.bcsr_concatenate,
+)
+
 
 def _add_sparse(spenv, *spvalues):
   X, Y = spvalues

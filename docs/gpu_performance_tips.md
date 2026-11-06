@@ -390,7 +390,7 @@ def while_body(carry, i):
   return carry, i
 
 
-@functools.partial(jax.jit, static_argnames=["mesh"])
+@jax.jit(static_argnames=["mesh"])
 def entry_computation(weights, input_buffer, mesh):
 
   # Init output buffer.

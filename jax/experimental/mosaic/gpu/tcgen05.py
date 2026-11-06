@@ -19,7 +19,8 @@ import dataclasses
 import functools
 import itertools
 import math
-from typing import Any, Callable, Iterator, cast
+from typing import Any, cast
+from collections.abc import Callable, Iterator
 
 from jaxlib.mlir import ir
 from jaxlib.mlir.dialects import arith
@@ -797,7 +798,7 @@ def commit_arrive(
 ) -> None:
   if isinstance(barrier, utils.BarrierRef):
     barrier = barrier.get_ptr()
-  elif barrier.type != ir.Type.parse("!llvm.ptr<3>"):
+  elif barrier.type != llvm.PointerType.get(address_space=3):
     raise ValueError(
         "barrier must be a Mosaic barrier or a SMEM pointer, got:"
         f" {barrier.type}"
@@ -848,8 +849,8 @@ def tmem_alloc(tmem_addr: ir.Value, ncols: int, collective: bool = False, exact:
       raise ValueError(f"tmem_addr must be in shared memory, got: {ref_ty}")
     if math.prod(ref_ty.shape) != 1:
       raise ValueError(f"tmem_addr must contain a single element, got: {ref_ty}")
-    tmem_addr = utils.memref_ptr(tmem_addr, memory_space=3)
-  elif tmem_addr.type != ir.Type.parse("!llvm.ptr<3>"):
+    tmem_addr = utils.memref_ptr(tmem_addr)
+  elif tmem_addr.type != llvm.PointerType.get(address_space=3):
     raise ValueError(f"tmem_addr must be an SMEM pointer or a memref, got: {tmem_addr.type}")
   ncols = tmem_alloc_exact_ncols(ncols, exact)
   group = nvvm.CTAGroupKind.CTA_2 if collective else nvvm.CTAGroupKind.CTA_1
@@ -859,8 +860,7 @@ def tmem_alloc(tmem_addr: ir.Value, ncols: int, collective: bool = False, exact:
 
 def _tmem_addr_to_ptr(tmem_addr: ir.Value) -> ir.Value:
   assert tmem_addr.type == ir.IntegerType.get_signless(32)
-  ptr_ty = ir.Type.parse("!llvm.ptr<6>")
-  return llvm.inttoptr(ptr_ty, tmem_addr)
+  return llvm.inttoptr(llvm.PointerType.get(address_space=6), tmem_addr)
 
 
 def tmem_dealloc(tmem_addr: ir.Value, ncols: int, collective: bool = False, exact: bool = True) -> None:
@@ -906,11 +906,9 @@ def _tmem_load(tmem_addr, shape, num, pack: bool):
   num_out_regs, regs_vector = _tmem_access_helper(shape, num)
   pack_mod = ".pack::16b" if pack else ""
   regs = llvm.inline_asm(
-      ir.Type.parse(
-          "!llvm.struct<(" + ",".join("i32" for _ in range(num_out_regs)) + ")>"
-      ),
+      llvm.StructType.get_literal([i32] * num_out_regs),
       [tmem_addr],
-      f"tcgen05.ld.sync.aligned.{shape}.x{num}{pack_mod}.b32 {regs_vector}, [${num_out_regs}];",
+      f"tcgen05.ld.sync.aligned.{shape}.x{num}{pack_mod}.b32 {regs_vector}, [${num_out_regs}];",  # pylint: disable=line-too-long
       "=r," * num_out_regs + "r",
       has_side_effects=True,
   )
@@ -1658,11 +1656,10 @@ def async_copy_scales_smem_to_tmem(
           f"SMEM has shape {smem_shape}, but expected {expected_smem_shape} for"
           f" TMEM ref shape {tmem_ref.shape}"
       )
-    smem_base_ptr = utils.memref_ptr(smem_ref, 3)
     k_tile_stride_i32 = strides[1] // 4
     for k_tile in range(k_tiles):
       load_ptr = utils.getelementptr(
-          smem_base_ptr, [k_tile * k_tile_stride_i32], i32,
+          utils.memref_ptr(smem_ref), [k_tile * k_tile_stride_i32], i32
       )
       store_addr = arith.addi(
           tmem_ref.address, arith.constant(i32, 4 * k_tile),
@@ -1695,14 +1692,13 @@ def async_copy_scales_smem_to_tmem(
     raise ValueError("Scale tile strides must be a multiple of 128")
   mn_tile_stride_i32 = mn_tile_stride // 4
   k_tile_stride_i32 = k_tile_stride // 4
-  smem_base_ptr = utils.memref_ptr(smem_ref, 3)
   # TODO(apaszke): Need to figure out the TMEM layout otherwise and MMA doesn't
   # support it anyway.
   if smem_shape[0] > 2:
     raise NotImplementedError("Only M/N up to 256 supported")
   for mn_tile, k_tile in np.ndindex(smem_shape[:2]):
     load_ptr = utils.getelementptr(
-        smem_base_ptr,
+        utils.memref_ptr(smem_ref),
         [mn_tile * mn_tile_stride_i32 + k_tile * k_tile_stride_i32],
         i32,
     )
@@ -1754,10 +1750,9 @@ def async_copy_sparse_metadata_smem_to_tmem(
   if k_tile_stride % 16:
     raise ValueError("K tile stride must be a multiple of 16")
   k_tile_byte_stride = k_tile_stride // 4
-  smem_base_ptr = utils.memref_ptr(smem_ref, 3)
   for k_tile in range(expected_smem_shape[1]):
     load_ptr = utils.getelementptr(
-        smem_base_ptr, [k_tile * k_tile_byte_stride], i8
+        utils.memref_ptr(smem_ref), [k_tile * k_tile_byte_stride], i8
     )
     store_ptr = arith.addi(tmem_ref.address, arith.constant(i32, 4 * k_tile))
     # The "core matrix" here is the same as in MMA: 8x(16 bytes).
@@ -1834,9 +1829,7 @@ def async_copy_smem_to_tmem(
   num_smem_minor_tiles = smem_shape[1]
   cps_per_smem_minor_tile = swizzle_elems // minor_elems_per_cp
   col_tile_byte_stride = col_tile_stride * bitwidth // 8
-  smem_base_ptr = utils.memref_ptr(
-      smem_ref, utils.WORKGROUP_NVPTX_ADDRESS_SPACE
-  )
+  smem_base_ptr = utils.memref_ptr(smem_ref)
   group = (
       nvvm.CTAGroupKind.CTA_2 if collective else nvvm.CTAGroupKind.CTA_1
   )

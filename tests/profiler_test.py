@@ -19,6 +19,7 @@ from functools import partial
 import glob
 import gzip
 import os
+import pathlib
 import shutil
 import sys
 import tempfile
@@ -26,17 +27,17 @@ import threading
 import time
 import unittest
 import unittest.mock
-from absl.testing import absltest
-import pathlib
 
+from absl.testing import absltest
 import jax
+from jax import jit
+from jax._src import profiler
+from jax._src.lib import jaxlib_extension_version as jaxlib_extension_version
+import jax._src.test_util as jtu
 import jax.numpy as jnp
 import jax.profiler
-import jax._src.test_util as jtu
 
-from jax._src import profiler
-from jax import jit
-
+import multiprocessing as mp
 
 try:
   import portpicker
@@ -50,6 +51,24 @@ except ImportError:
   _pywrap_profiler_plugin = None
 
 jax.config.parse_flags_with_absl()
+
+
+# Worker function for subprocess profiling test.
+def _worker_func(port: int, started_queue):
+  try:
+    jax.profiler.start_server(port=port, requires_backend=False)
+    if started_queue is not None:
+      started_queue.put(True)
+    while True:
+      with jax.profiler.TraceAnnotation("worker_step"):
+        with jax.profiler.TraceAnnotation("work"):
+          time.sleep(0.1)
+  except Exception as e:
+    print(f"Worker failed: {e}")
+    if started_queue is not None:
+      started_queue.put(False)
+  finally:
+    jax.profiler.stop_server()
 
 
 # We do not allow multiple concurrent profiler sessions.
@@ -139,6 +158,49 @@ class ProfilerTest(unittest.TestCase):
       if jtu.test_device_matches(["tpu"]):
         self.assertIn(b"/device:TPU", proto)
       self.assertIn(b"pxla.py", proto)
+
+  @unittest.skipIf(not portpicker, "Test requires portpicker")
+  @unittest.skipUnless(
+      jaxlib_extension_version >= 448,
+      "Subprocess profiling requires jaxlib version 448 or later",
+  )
+  def testSubprocessProfiling(self):
+    """Test that subprocess profiling works correctly and aggregates results."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+      port = portpicker.pick_unused_port()
+      ctx = mp.get_context(
+          "absl_spawn" if hasattr(mp, "handle_test_main") else "spawn"
+      )
+      sync_queue = ctx.Queue()
+      p = ctx.Process(target=_worker_func, args=(port, sync_queue), daemon=True)
+      p.start()
+      self.assertTrue(sync_queue.get())
+      unregister_fn = jax.profiler.register_subprocess(p.pid, port)
+      options = jax.profiler.ProfileOptions()
+      options.advanced_configuration = {
+          "profile_subprocesses": True,
+      }
+      jax.profiler.start_trace(tmpdir, profiler_options=options)
+      with jax.profiler.TraceAnnotation("main_step"):
+        with jax.profiler.TraceAnnotation("main"):
+          time.sleep(0.5)
+      jax.profiler.stop_trace()
+      unregister_fn()
+      p.terminate()
+      proto_path = glob.glob(
+          os.path.join(tmpdir, "**/*.xplane.pb"), recursive=True
+      )
+      self.assertEqual(len(proto_path), 1)
+      with open(proto_path[0], "rb") as f:
+        proto = f.read()
+      # Sanity check that serialized proto contains host and device traces
+      # without deserializing.
+      self.assertIn(b"/host:CPU", proto)
+      self.assertIn(b"/host:CPU [" + str(p.pid).encode("utf-8") + b"]", proto)
+      self.assertIn(b"main_step", proto)
+      self.assertIn(b"main", proto)
+      self.assertIn(b"worker_step", proto)
+      self.assertIn(b"work", proto)
 
   def testProgrammaticProfilingWithOptions(self):
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -476,7 +538,7 @@ class ProfilerTest(unittest.TestCase):
     thread_profiler.join()
     self._check_xspace_pb_exist(logdir)
 
-  @unittest.skip("Profiler takes >30s on Cloud TPUs")
+  @unittest.skip("Runs into 'Only one profiler server can be active' error")
   @unittest.skipIf(
       not (portpicker and _pywrap_profiler_plugin),
     "Test requires xprof and portpicker")
@@ -489,7 +551,13 @@ class ProfilerTest(unittest.TestCase):
     # Mock XProf call in collect_profile.
     _pywrap_profiler_plugin.trace = unittest.mock.MagicMock()
     def on_profile():
-      jax.collect_profile(port, 500, logdir, no_perfetto_link=True)
+      jax.collect_profile.collect_profile(
+          port=port,
+          duration_in_ms=500,
+          host="127.0.0.1",
+          log_dir=logdir,
+          no_perfetto_link=True,
+      )
       profile_done.set()
 
     thread_profiler = threading.Thread(
@@ -576,4 +644,7 @@ class ProfilerTest(unittest.TestCase):
 
 
 if __name__ == "__main__":
-  absltest.main(testLoader=jtu.JaxTestLoader())
+  if hasattr(mp, "handle_test_main"):
+    mp.handle_test_main(partial(absltest.main, testLoader=jtu.JaxTestLoader()))
+  else:
+    absltest.main(testLoader=jtu.JaxTestLoader())

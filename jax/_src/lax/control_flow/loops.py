@@ -19,6 +19,7 @@ from functools import partial
 import inspect
 import itertools as it
 import operator
+import os
 from typing import Any, TypeVar
 import weakref
 
@@ -33,44 +34,51 @@ from jax._src import dtypes
 from jax._src import effects
 from jax._src import hijax
 from jax._src import linear_util as lu
+from jax._src import sharding_impls as sharding
 from jax._src import source_info_util
 from jax._src import state
 from jax._src import util
-from jax._src.api_util import (
-    check_no_aliased_ref_args, _check_no_aliased_closed_over_refs,
+from jax._src import xla_bridge as xb
+from jax._src.api_util import ( _check_no_aliased_closed_over_refs,
+    check_no_aliased_ref_args,
     check_no_transformed_refs_args)
 from jax._src.core import (
-  ShapedArray, typeof, cur_qdd, ClosedJaxpr, AbstractValue)
+    AbstractValue,
+    ClosedJaxpr,
+    ShapedArray,
+    cur_qdd,
+    typeof,
+)
 from jax._src.interpreters import ad
 from jax._src.interpreters import batching
 from jax._src.interpreters import mlir
 from jax._src.interpreters import partial_eval as pe
 from jax._src.interpreters import pxla
-from jax._src import sharding_impls as sharding
-from jax._src.mesh import use_abstract_mesh
 from jax._src.lax import lax
-from jax._src.lax import utils as lax_utils
 from jax._src.lax import slicing
+from jax._src.lax import utils as lax_utils
 from jax._src.lax import windowed_reductions
 from jax._src.lax.control_flow.common import (
-    _avals_short, _prune_zeros, _typecheck_param,
-    _make_closed_jaxpr)
+    _avals_short,
+    _make_closed_jaxpr, _prune_zeros, _typecheck_param)
 from jax._src.lax.other import logaddexp
-from jax._src.pjit import auto_axes, PartitionSpec as P, reshard
+from jax._src.lib import jaxlib_extension_version
 from jax._src.lib.mlir import ir
+from jax._src.lib.mlir.dialects import chlo
 from jax._src.lib.mlir.dialects import hlo
+from jax._src.mesh import use_abstract_mesh
+from jax._src.pjit import PartitionSpec as P, auto_axes, reshard
 from jax._src.sharding_impls import canonicalize_sharding
-from jax._src.state import discharge as state_discharge, AbstractRef
+from jax._src.state import AbstractRef, discharge as state_discharge
 from jax._src.traceback_util import api_boundary
 from jax._src.tree_util import equality_errors
+from jax._src.tree_util import ( FlatTree,
+    keystr, tree_flatten, tree_map, tree_unflatten,
+    treedef_is_leaf)
 from jax._src.typing import Array
 from jax._src.util import (
     merge_lists, partition_list, safe_map, safe_zip, split_list,
-    split_list_checked, unzip2, weakref_lru_cache, subs_list)
-from jax._src import xla_bridge as xb
-from jax._src.tree_util import (
-    keystr, tree_flatten, tree_map, tree_unflatten,
-    treedef_is_leaf, FlatTree)
+    split_list_checked, subs_list, unzip2, weakref_lru_cache)
 import numpy as np
 
 _map = safe_map
@@ -735,6 +743,61 @@ pe.custom_staging_rules[eval_jaxpr_p] = _stage_jaxpr
 def _stage_jaxpr_abstract_eval(*_, jaxpr):
   return jaxpr.out_avals, jaxpr.effects
 
+@eval_jaxpr_p.def_impl
+def _eval_jaxpr_impl(*args, jaxpr):
+  return core.jaxpr_as_fun(jaxpr)(*args)
+
+def _eval_jaxpr_jvp(primals, tangents, *, jaxpr):
+  nonzeros = [type(t) is not ad_util.Zero for t in tangents]
+  jaxpr_jvp, nonzeros_out = ad.jvp_jaxpr(jaxpr, nonzeros, False)
+  nz_tangents = [t for t, nz in zip(tangents, nonzeros) if nz]
+  outs = eval_jaxpr_p.bind(*primals, *nz_tangents, jaxpr=jaxpr_jvp)
+  primals_out, tangents_out = split_list(outs, [len(jaxpr.out_avals)])
+  nz_tangents_out = iter(tangents_out)
+  tangents_out = [next(nz_tangents_out) if nz else ad_util.Zero(aval.to_tangent_aval())
+                  for aval, nz in zip(jaxpr.out_avals, nonzeros_out)]
+  return primals_out, tangents_out
+ad.primitive_jvps[eval_jaxpr_p] = _eval_jaxpr_jvp
+
+def _eval_jaxpr_batching_rule(axis_data, args, dims, *, jaxpr):
+  batched = [d is not batching.not_mapped for d in dims]
+  new_jaxpr, out_batched = batching.batch_jaxpr(jaxpr, axis_data, batched, False)
+  new_args = [batching.moveaxis(x, d, 0)
+              if d is not batching.not_mapped and d != 0 else x
+              for x, d in zip(args, dims)]
+  outs = eval_jaxpr_p.bind(*new_args, jaxpr=new_jaxpr)
+  out_dims = [0 if b else batching.not_mapped for b in out_batched]
+  return outs, out_dims
+batching.fancy_primitive_batchers[eval_jaxpr_p] = _eval_jaxpr_batching_rule
+
+def _eval_jaxpr_linearize(is_vjp, nzs, *primals_in, jaxpr):
+  lin_out = ad.linearize_jaxpr(jaxpr, nzs, is_vjp=is_vjp)
+  primal_jaxpr, num_res_out, nzs_out, in_fwd_res, tangent_jaxpr = lin_out
+  primals_and_res = eval_jaxpr_p.bind(*primals_in, jaxpr=primal_jaxpr)
+  primals_out, non_fwd_res = split_list(
+      primals_and_res, [len(primals_and_res) - num_res_out])
+  res = util.subs_list(in_fwd_res, [*jaxpr.consts, *primals_in], non_fwd_res)
+
+  def tangent_fun(res, *tangents):
+    nz_tangents = [ad.instantiate_zeros(x) for nz, x in zip(nzs, tangents) if nz]
+    nz_tangents_out = eval_jaxpr_p.bind(*res, *nz_tangents, jaxpr=tangent_jaxpr)
+    tangent_avals_out = [v.aval.to_tangent_aval() for v in jaxpr.jaxpr.outvars]
+    nz_tangents_out_ = iter(nz_tangents_out)
+    tangents_out = [next(nz_tangents_out_) if nz else ad.Zero(aval)
+                    for aval, nz in zip(tangent_avals_out, nzs_out)]
+    assert next(nz_tangents_out_, None) is None
+    return tangents_out
+
+  return primals_out, nzs_out, res, tangent_fun
+ad.primitive_linearizations[eval_jaxpr_p] = _eval_jaxpr_linearize
+
+def _eval_jaxpr_transpose(ct, *args, jaxpr):
+  jaxpr_, consts = jaxpr.jaxpr, jaxpr.consts
+  jaxpr_ = pe.convert_constvars_jaxpr(jaxpr_)
+  ad.call_transpose_fancy(core.closed_call_p, ct, *consts, *args,
+                          call_jaxpr=jaxpr_)
+ad.fancy_transposes[eval_jaxpr_p] = _eval_jaxpr_transpose
+
 def _scan_abstract_eval(*args, reverse, length, num_consts, num_carry, jaxpr,
                         unroll):
   if len(args) != len(jaxpr.in_avals):
@@ -1142,8 +1205,7 @@ def _transpose_scan_jaxpr_fancy(
             if isinstance(x, ad.ValAccum)]
 
   dbg = jaxpr.jaxpr.debug_info.with_unknown_names()
-  transposed_wrapped = lu.wrap_init(transposed, debug_info=dbg)
-  return _make_closed_jaxpr(transposed_wrapped, trans_avals)
+  return _make_closed_jaxpr(transposed, trans_avals, dbg)
 
 
 def _scan_batching_rule(axis_data, args, dims, reverse, length, jaxpr,
@@ -2074,7 +2136,7 @@ def _while_lowering(ctx, *args, cond_jaxpr, body_jaxpr, cond_nconsts,
       return out
     return mlir.lower_fun(fun)(ctx, *args)
 
-  loop_carry_types = _map(mlir._aval_to_ir_types, ctx.avals_in)
+  loop_carry_types = _map(partial(mlir._aval_to_ir_types, ctx.module_context), ctx.avals_in)
   body_effects = effects.ordered_effects.filter_in(body_jaxpr.effects)
   num_tokens = len(body_effects)
   tokens = [ctx.tokens_in.get(eff) for eff in body_effects]
@@ -2426,7 +2488,7 @@ def _pred_bcast_select_hlo(ctx,
     bcast_pred = mlir.broadcast_in_dim(
         ctx, pred, core.ShapedArray(x_y_aval.shape, np.dtype(np.bool_)),
         broadcast_dimensions=list(range(len(pred_aval.shape))))
-    return hlo.SelectOp(bcast_pred, x, y).results
+    return [hlo.select(bcast_pred, x, y)]
 
 ### fori_loop
 
@@ -2899,6 +2961,68 @@ def _interleave(a, b, axis):
 
 ### Cumulative reductions.
 
+def _cumred_chlo_lowering(ctx, x, *, axis, reverse, reducer, identity):
+  dtype = ctx.avals_in[0].dtype
+  init_shape = x.type.shape[:axis] + x.type.shape[axis + 1 :]
+  init_type = ir.RankedTensorType.get(init_shape, x.type.element_type)
+
+  init = mlir.ir_constant(identity(dtype))
+  if init_shape:
+    dims = ir.DenseI64ArrayAttr.get([])
+    init = hlo.BroadcastInDimOp(init_type, init, dims).result
+
+  scan_op = chlo.ScanOp(
+      [x.type],
+      [init_type],
+      [x],
+      [init],
+      dimension=ir.IntegerAttr.get(ir.IntegerType.get_signless(64), axis),
+      is_reverse=ir.BoolAttr.get(reverse),
+      is_associative=ir.BoolAttr.get(True),
+  )
+  body_block = scan_op.body.blocks.append(init_type, init_type)
+  with ir.InsertionPoint(body_block):
+    x_arg, carry_arg = body_block.arguments
+    res = reducer(x_arg, carry_arg)
+    hlo.return_([res, res])
+  return scan_op.results[:1]
+
+
+def _is_supported_cumred(inp, axis, reverse):
+  if os.environ.get('JAX_ENABLE_CHLO_SCAN') != '1':
+    return False
+
+  return (
+      jaxlib_extension_version >= 449
+      and not reverse
+      and isinstance(inp, ShapedArray)
+      and core.is_constant_shape(inp.shape)
+      and inp.shape[axis] > 0
+      and inp.sharding.spec[axis] is None
+      and inp.dtype != np.bool_
+      and not np.issubdtype(inp.dtype, np.complexfloating)
+  )
+
+def _cumred_gpu_lowering(
+    reduce_window_fn: Callable,
+    reducer: Callable,
+    identity: Callable,
+    ctx,
+    x,
+    *,
+    axis,
+    reverse,
+):
+  if not _is_supported_cumred(ctx.avals_in[0], axis, reverse):
+    fun = partial(cumred_reduce_window_impl, reduce_window_fn)
+    return mlir.lower_fun(fun, multiple_results=False)(
+        ctx, x, axis=axis, reverse=reverse
+    )
+  return _cumred_chlo_lowering(
+      ctx, x, axis=axis, reverse=reverse, reducer=reducer, identity=identity
+  )
+
+
 def cumsum(operand: Array, axis: int = 0, reverse: bool = False) -> Array:
   """Computes a cumulative sum along `axis`."""
   return cumsum_p.bind(operand, axis=int(axis), reverse=bool(reverse))
@@ -3014,3 +3138,19 @@ ad.primitive_jvps[cumlogsumexp_p] = partial(_cumulative_jvp_rule, combine_fn=log
 ad.primitive_jvps[cumprod_p] = partial(_cumulative_jvp_rule, combine_fn=lax.mul)
 ad.primitive_jvps[cummin_p] = partial(_cumulative_jvp_rule, combine_fn=lax.min)
 ad.primitive_jvps[cummax_p] = partial(_cumulative_jvp_rule, combine_fn=lax.max)
+
+# TODO(csigg): Register lowering for cumprod etc as well. Although those don't
+# have a corresponding custom kernel implementation in XLA (like cumsum does
+# with CUB), XLA's TryOptimizeAssociativeScan pass will intercept these scans
+# and expand them to the same reduce-window tree as if we emitted a
+# reduce-window series directly here.
+mlir.register_lowering(
+    cumsum_p,
+    partial(
+        _cumred_gpu_lowering,
+        windowed_reductions._reduce_window_sum,
+        hlo.add,
+        lax._get_sum_identity,
+    ),
+    platform='gpu',
+)

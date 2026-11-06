@@ -17,14 +17,13 @@ from __future__ import annotations
 import abc
 from collections.abc import Callable, Iterable, Iterator, Sequence
 import functools
-import threading
 from functools import partial
 import itertools as it
 import logging
 import math
 import operator
 from typing import (Any, Generic, ParamSpec, Protocol, SupportsIndex,
-                    Type, TypeVar, overload, TYPE_CHECKING, cast)
+                    TypeVar, overload, TYPE_CHECKING, cast)
 import weakref
 
 import numpy as np
@@ -33,7 +32,6 @@ from jax._src import config
 from jax._src.lib import pytree as lib_pytree
 from jax._src.lib import weakref_lru_cache as lib_weakref_lru_cache
 from jax._src.lib import utils as jaxlib_utils
-from jax._src.lib import jaxlib_extension_version
 
 logger = logging.getLogger(__name__)
 
@@ -366,23 +364,7 @@ def _weakref_lru_cache(f, maxsize, trace_context_in_key, explain):
 # an arg or a kwarg, then the interner may store multiple entries for the same
 # logical call. If this troubles you canonicalize the arguments first, e.g.
 # via a wrapper function.
-if jaxlib_extension_version >= 433:
-  weak_value_interner = lib_weakref_lru_cache.weak_value_interner
-else:
-  def weak_value_interner(f):
-    cache = weakref.WeakValueDictionary()
-    lock = threading.Lock()
-    @functools.wraps(f)
-    def wrapper(*args, **kwargs):
-      key = (args, frozenset(kwargs.items()))
-      with lock:
-        result = cache.get(key)
-        if result is not None:
-          return result
-        result = f(*args, **kwargs)
-        cache[key] = result
-        return result
-    return wrapper
+weak_value_interner = lib_weakref_lru_cache.weak_value_interner
 
 
 def immutable(cls):
@@ -414,7 +396,7 @@ def immutable(cls):
 
 # The types of arguments for which `multi_weakref_lru_cache` should keep
 # weak references.
-weakref_cache_key_types: set[Type] = set()
+weakref_cache_key_types: set[type] = set()
 
 
 _multi_weakref_registry = lib_pytree.PyTreeRegistry(

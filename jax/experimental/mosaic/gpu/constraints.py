@@ -19,15 +19,27 @@ from __future__ import annotations
 import abc
 from collections.abc import Sequence
 import dataclasses
+import enum
 import math
 from typing import Any, assert_never, final
 
+import numpy as np
+
+from . import dialect_lowering as lowering
 from . import fragmented_array as fa
 from . import inference_utils
 from . import launch_context as lc
 from . import layouts as layouts_lib
 from . import tcgen05
 from . import utils
+
+
+class MemorySpace(enum.Enum):
+  """The memory space of a variable."""
+
+  REG = enum.auto()
+  SMEM = enum.auto()
+  TMEM = enum.auto()
 
 
 # TODO(bchetioui): consider defining an interface for variable keys that carry
@@ -42,6 +54,14 @@ class Variable:
   `key` is supposed to be hashable.
   """
   key: VariableKey
+
+  @property
+  def shape(self) -> tuple[int, ...]:
+    return self.key.shape
+
+  @property
+  def memory_space(self) -> MemorySpace:
+    return self.key.memory_space
 
   def __str__(self):
     return f"V({self.key})"
@@ -96,6 +116,11 @@ class Reduce:
   # with size one.
   keep_dims: bool = False
 
+  def __post_init__(self):
+    assert self.axes
+    assert self.axes == tuple(sorted(self.axes)), "axes must be sorted."
+    assert self.axes[0] >= 0, "axes must not contain negative indices."
+
   def __str__(self):
     return (
         f"Reduce([{self.axes}], {self.expression}, rank={self.rank},"
@@ -113,9 +138,45 @@ class Reshape:
 @dataclasses.dataclass(frozen=True)
 class Transpose:
   expression: Expression
+  permutation: tuple[int, ...]
+
+  def __post_init__(self):
+    if sorted(self.permutation) != list(range(len(self.permutation))):
+      raise ValueError(f"Invalid permutation {self.permutation}")
 
   def __str__(self):
-    return f"T({self.expression})"
+    return f"T({self.expression}, permutation={self.permutation})"
+
+
+@dataclasses.dataclass(frozen=True)
+class CollapseShape:
+  """Collapses a shape into a lower rank shape via a reassociation.
+
+  `reassociation` is a tuple of integers, where each integer is the number of
+  contiguous dimensions that must be collapsed together. Each group must
+  consist of at least one dimension, and `sum(reassociation)` must be equal to
+  the rank of the source shape.
+  """
+  expression: Expression
+  source_shape: tuple[int, ...]
+  reassociation: tuple[int, ...]
+
+  def __post_init__(self):
+    for num_collapsed_dims in self.reassociation:
+      if num_collapsed_dims <= 0:
+        raise ValueError(
+            f"Invalid reassociation {self.reassociation}. Each group of "
+            "collapsed dimensions must contain at least one dimension."
+        )
+    if sum(self.reassociation) != len(self.source_shape):
+      raise ValueError(
+          f"Invalid reassociation {self.reassociation}. The number of collapsed"
+          f" dimensions must be equal to the rank of the source shape."
+      )
+
+  def __str__(self):
+    return (f"CollapseShape({self.expression}, source_shape={self.source_shape}"
+            f", reassociation={self.reassociation})")
 
 
 Expression = (
@@ -124,6 +185,7 @@ Expression = (
     | Reduce
     | Reshape
     | Transpose
+    | CollapseShape
 )
 
 
@@ -191,13 +253,19 @@ def reduce_transpose_expression(
       if tile_transform is None:
         return SMEMTiling(None)
       tiling = tile_transform.tiling
-      if len(tiling) != 2:
-        raise NotImplementedError(
-            f"Only 2D tilings are supported, got {len(tiling)}"
-        )
-      return SMEMTiling(lc.TileTransform(tiling[::-1]))
+      permutation = transpose.permutation
+      tiling_offset = len(permutation) - len(tiling)
+      # We reject if there's a swap between tiled dimensions and untiled dimensions.
+      #
+      # For example:
+      #   A permutation (0, 3, 2, 1) and tiling of length <=2, we reject because tiling becomes non-contiguous.
+      #   A permutation (0, 3, 2, 1) and tiling of length 3, we accept.
+      if any(dim < tiling_offset for dim in permutation[-len(tiling) :]):
+        return Unsatisfiable()
+      new_tiling = tuple(tiling[dim - tiling_offset] for dim in permutation[-len(tiling):])
+      return SMEMTiling(lc.TileTransform(new_tiling))
     case _:
-      return Transpose(expression=reduced_expr)
+      return Transpose(expression=reduced_expr, permutation=transpose.permutation)
 
 
 def reduce_reduce_expression(
@@ -225,18 +293,83 @@ def reduce_reduce_expression(
         return RegisterLayout(layout.reduce(reduced_tiling_axes))
       return RegisterLayout(layout)
     case RegisterLayout(value=fa.WGStridedFragLayout() as layout):
-      # We only support reducing leading dimensions.
-      if expr.axes != tuple(range(len(expr.axes))):
+      # We don't support cross-lane and non vec_size preserving reductions.
+      trailing_dims = layout.shape[expr.axes[-1] + 1 :]
+      if math.prod(trailing_dims) % (layout.vec_size * fa.WARPGROUP_SIZE):
         return default()
       shape = utils.reduce_shape(layout.shape, expr.axes, expr.keep_dims)
-      if math.prod(shape) % (layout.vec_size * fa.WARPGROUP_SIZE) != 0:
-        return default()
       return RegisterLayout(fa.WGStridedFragLayout(shape, layout.vec_size))
     case RegisterLayout(value=fa.WGSplatFragLayout() as layout):
       shape = utils.reduce_shape(layout.shape, expr.axes, expr.keep_dims)
       return RegisterLayout(fa.WGSplatFragLayout(shape))
     case _:
       return default()
+
+
+def reduce_collapse_shape_expression(
+    expr: CollapseShape, assignments: dict[Variable, Constant]
+) -> Expression | Unsatisfiable:
+  reduced_expr = reduce_expression(expr.expression, assignments)
+  match reduced_expr:
+    case Unsatisfiable():
+      return Unsatisfiable()
+    case SMEMTiling(value=tile_transform):
+      if tile_transform is None:
+        return SMEMTiling(None)
+      tiling = tile_transform.tiling
+      rev_tiling_to_process = list(tiling)[::-1]
+      rev_shape_to_process = expr.source_shape[-len(tiling):][::-1]
+      # Ensure that the provided tiling applies to the shape. Otherwise, the
+      # expression is unsatisfiable.
+      for s, t in zip(rev_shape_to_process, rev_tiling_to_process):
+        if s % t != 0:
+          return Unsatisfiable()
+      rev_new_tiling: list[int] = []
+      for ndim in expr.reassociation[::-1]:
+        # Collapsing tiled dimensions into untiled dimensions is not
+        # supported. While there is a reasonable way of handling this case in
+        # particular situations, we forbid it in the semantics of
+        # `CollapseShape`.
+        if len(rev_tiling_to_process) < ndim:
+          return Unsatisfiable()
+
+        rev_tiling_slice = rev_tiling_to_process[:ndim]
+        rev_shape_slice = rev_shape_to_process[:ndim]
+        new_tiling_dim = math.prod(rev_tiling_slice)
+        num_elems = math.prod(rev_shape_slice)
+        assert num_elems % new_tiling_dim == 0
+        # We can collapse dimensions when the tiling is of the form
+        # (1*, partial_dim?, full_dim*)---i.e. when it contains any number of
+        # leading unit dimensions, followed by at most one arbitrary non-unit
+        # dimension, and any number of trailing "full" dimensions (where the
+        # tiling size equals the dimension size).
+        #
+        # Here, the tiling and shape are reversed, so we look for the pattern
+        # (full_dim*, partial_dim?, 1*).
+        suffix_length = 0
+        for t, s in zip(rev_tiling_slice, rev_shape_slice):
+          if t != s:
+            break
+          suffix_length += 1
+        if (rev_unsuffixed_tiling := rev_tiling_slice[suffix_length:]):
+          # Ignore the partial dimension, since it can be anything.
+          _, *rev_prefix_tiling = rev_unsuffixed_tiling
+          if any(t != 1 for t in rev_prefix_tiling):
+            return Unsatisfiable()
+        rev_new_tiling.append(new_tiling_dim)
+        rev_tiling_to_process = rev_tiling_to_process[ndim:]
+        rev_shape_to_process = rev_shape_to_process[ndim:]
+        if not rev_tiling_to_process:
+          break
+      assert not rev_tiling_to_process
+      assert not rev_shape_to_process
+      new_tiling = tuple(rev_new_tiling[::-1])
+      return SMEMTiling(lc.TileTransform(tuple(new_tiling)))
+    case Constant():
+      raise NotImplementedError(
+          "CollapseShape is only implemented for variables in SMEM")
+    case _:
+      return dataclasses.replace(expr, expression=reduced_expr)
 
 
 def reduce_expression(
@@ -254,6 +387,8 @@ def reduce_expression(
       return reduce_reshape_expression(expr, assignments)
     case Transpose():
       return reduce_transpose_expression(expr, assignments)
+    case CollapseShape():
+      return reduce_collapse_shape_expression(expr, assignments)
     case _:
       assert_never(expr)
 
@@ -461,6 +596,27 @@ class IsTransferableTmemRegisters(IsTransferable):
     return f"IsTransferableTmemRegisters({self.source} ⟶ {self.target})"
 
 
+class OptimizedTransferKind(enum.Enum):
+  """A classification of the type of SMEM <-> Registers transfer.
+
+  Specifically, this refers to whether the transfer should be optimized to
+  avoid bank conflicts, if optimization is not requested, or if optimization
+  should be done, but downgrading is acceptable.
+  """
+  # Denotes a conflict-free transfer.
+  OPTIMIZED = enum.auto()
+  # Denotes an unoptimized transfer.
+  UNOPTIMIZED = enum.auto()
+  # Denotes a transfer that we are willing to downgrade to UNOPTIMIZED in
+  # certain circumstances. This mode is necessary to accurately model the
+  # Pallas behavior for SMEM stores with certain combinations of layouts and
+  # transforms.
+  #
+  # TODO(bchetioui): implement symmetric default behaviours for load/store in
+  # Pallas, and remove/harden this mode.
+  DOWNGRADABLE = enum.auto()
+
+
 @dataclasses.dataclass(frozen=True)
 class IsTransferableSmemRegisters(IsTransferable):
   """States that `source` layout must be transferable across memory spaces to `target` layout.
@@ -469,26 +625,70 @@ class IsTransferableSmemRegisters(IsTransferable):
   be in registers.
   """
   strides: tuple[int, ...]
+  bitwidth: int
+  optimized: OptimizedTransferKind
 
   def _is_supported_smem_transfer(
       self,
       smem_layout: lc.TileTransform | None,
       reg_layout: fa.FragmentedLayout,
   ) -> bool:
-    # TODO(b/447079781): This is way too restrictive. We need to make it more
-    # precise by:
-    # - Consider whether the op is annotated with optimized copies or not.
-    # - If copies do not have to be optimized, always return True.
-    # - If copies have to be optimized, determine if the transfer is optimal by
-    #   calling fragmented_array.plan_tiled_transfer.
-    if inference_utils.is_mma_layout(reg_layout):
-      if smem_layout is None or len(smem_layout.tiling) != 2:
-        return False
-      transposed_layouts = {fa.TCGEN05_TRANSPOSED_LAYOUT, fa.WGMMA_TRANSPOSED_LAYOUT}
-      if list(self.strides[-2:]) != sorted(self.strides[-2:], reverse=True):
-        return reg_layout in transposed_layouts
-      return reg_layout not in transposed_layouts
-    return smem_layout is None
+    if not isinstance(reg_layout, fa.TiledLayout):
+      return smem_layout is None
+    if len(self.strides) < 2:
+      smem_transposed = False
+    else:
+      smem_transposed = self.strides[-1] > self.strides[-2]
+    tiling = smem_layout.tiling if smem_layout is not None else ()
+    tiling_rank = len(tiling)
+    # TODO(bchetioui): move this below the UNOPTIMIZED check once it is
+    # possible to do so.
+    if smem_transposed:
+      regs_transposed = reg_layout in {fa.TCGEN05_TRANSPOSED_LAYOUT, fa.WGMMA_TRANSPOSED_LAYOUT}
+      return tiling_rank == 2 and regs_transposed
+    # For a given `TiledLayout`, all transfers are possible if optimization is
+    # not required.
+    if self.optimized == OptimizedTransferKind.UNOPTIMIZED:
+      return True
+
+    if tiling_rank == 0 and self.optimized == OptimizedTransferKind.DOWNGRADABLE:
+      # Model the Pallas behavior of downgrading to unoptimized transfers in
+      # this case.
+      return True
+
+    # If `tiling_rank` is 0, then we tile by the shape. This is the logic that
+    # is implemented in `load_untiled` and `store_untiled`.
+    if tiling_rank == 0:
+      tiling = self.shape
+      tiling_rank = len(tiling)
+      tiled_strides = lowering.tile_strides(self.strides, tiling)
+      # Mirrors the logic in `swap_p` and `get_p` lowering, in the untiled case.
+      swizzle = 16
+    else:
+      tiled_strides = lowering.tile_strides(self.strides, tiling)
+      minor_tiling = tiling[np.argmin(tiled_strides[-len(tiling):])]
+      swizzle = inference_utils.compute_swizzle(minor_tiling, self.bitwidth)
+
+    first_tiled_dim = len(self.shape) - tiling_rank
+    nested_ref_shape = tuple(
+        (self.shape[i] // tiling[i - first_tiled_dim], tiling[i - first_tiled_dim])
+        if i >= first_tiled_dim and tiling[i - first_tiled_dim] != 1
+        else (self.shape[i],)
+        for i in range(len(self.shape))
+    )
+    nested_ref_strides = tuple(
+        (tiled_strides[i], tiled_strides[i + tiling_rank])
+        if i >= first_tiled_dim and tiling[i - first_tiled_dim] != 1
+        else (tiled_strides[i],)
+        for i in range(len(self.shape))
+    )
+
+    try:
+      fa.plan_tiled_transfer(nested_ref_shape, nested_ref_strides,
+                             reg_layout, self.bitwidth, swizzle)
+      return True
+    except fa.TransferPlanDerivationError:
+      return False
 
   def holds(self) -> bool | None:
     match self.source, self.target:
@@ -544,6 +744,9 @@ class Divides:
 
   `expr` is not allowed to contain more dimensions than `tiling_multiple`, and
   this constraint therefore also constrains the rank of `expr`.
+
+  If `expr` is a `RegisterLayout` of `WGStridedFragLayout` or
+  `WGSplatFragLayout` we return True.
   """
   expr: Expression
   tiling_multiple: tuple[int, ...]
@@ -555,6 +758,10 @@ class Divides:
         return True
       case SMEMTiling(value=lc.TileTransform(tiling=t)):
         tiling = t
+      case RegisterLayout(
+          value=fa.WGStridedFragLayout() | fa.WGSplatFragLayout()
+      ):
+        return True
       case RegisterLayout(value=fa.TiledLayout() as layout):
         tiling = layout.base_tile_shape
       case TMEMLayout(value):
@@ -574,6 +781,37 @@ class Divides:
 
   def __str__(self):
     return f"{self.tiling_multiple} % {self.expr} == 0"
+
+
+@dataclasses.dataclass(frozen=True)
+class MinorDimDivisibleBy:
+  """States that the minor dimension of the `expr` tiling is divisible by `divisor`.
+
+  If the last dimension is untiled, then `true` is returned.
+
+  If `expr` is not `SMEMTiling` but any other constant `ValueError` is raised.
+  """
+  expr: Expression
+  divisor: int
+
+  def holds(self) -> bool | None:
+    match self.expr:
+      case SMEMTiling(value=None):
+        return True
+      case SMEMTiling(value=lc.TileTransform(tiling=t)):
+        tiling = t
+      case Constant() as c:
+        raise ValueError(f"Unexpected value {c} in MinorDimDivisibleBy constraint")
+      case _:
+        return None
+
+    if not tiling:
+      return True
+
+    return tiling[-1] % self.divisor == 0
+
+  def __str__(self):
+    return f"{self.expr}.tiling[-1] % {self.divisor} == 0"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -653,6 +891,7 @@ Constraint = (
     | IsValidMmaTiling
     | Divides
     | IsSupportedBroadcast
+    | MinorDimDivisibleBy
 )
 
 
@@ -702,6 +941,11 @@ def reduce_constraint(
       if isinstance(expr_red, Unsatisfiable):
         return Unsatisfiable()
       return Divides(expr_red, tiling_multiple)
+    case MinorDimDivisibleBy(expr=expr, divisor=divisor):
+      expr_red = reduce_expression(expr, assignments)
+      if isinstance(expr_red, Unsatisfiable):
+        return Unsatisfiable()
+      return MinorDimDivisibleBy(expr_red, divisor)
     case IsSupportedBroadcast(src=src, dst=dst, dims=dims):
       src_red = reduce_expression(src, assignments)
       dst_red = reduce_expression(dst, assignments)
@@ -746,7 +990,9 @@ class ConstraintSystem:
           extract_variables(e)
         case Transpose(expression=e):
           extract_variables(e)
-        case _:
+        case CollapseShape(expression=e):
+          extract_variables(e)
+        case _ as never:
           assert_never(never)
     for constraint in self.constraints:
       match constraint:
@@ -764,6 +1010,8 @@ class ConstraintSystem:
         case IsValidMmaTiling(expr=expr):
           extract_variables(expr)
         case Divides(expr=expr):
+          extract_variables(expr)
+        case MinorDimDivisibleBy(expr=expr):
           extract_variables(expr)
         case IsSupportedBroadcast(src=src, dst=dst):
           extract_variables(src)
@@ -811,7 +1059,6 @@ def non_splat_variables(
   for constraint in constraints:
     match constraint:
       case NotOfType(expr=Variable() as v, type=fa.WGSplatFragLayout):
-        assert isinstance(v, Variable)  # make pytype happy
         vs.add(v)
   return vs
 
@@ -909,8 +1156,6 @@ def compute_transitively_equal_vars(
   for constraint in system.constraints:
     match constraint:
       case Equals(lhs=Variable() as lhs, rhs=Variable() as rhs):
-        assert isinstance(lhs, Variable)  # make pytype happy
-        assert isinstance(rhs, Variable)  # make pytype happy
         all_vars.add(lhs)
         all_vars.add(rhs)
         union(lhs, rhs)
@@ -955,7 +1200,6 @@ def _merge_all_divides_constraints(constraints: Sequence[Constraint]) -> list[Co
   for constraint in constraints:
     match constraint:
       case Divides(expr=Variable() as v) as d1:
-        assert isinstance(v, Variable)  # make pytype happy
         if (d0 := var_to_divides.get(v)) is None:
           var_to_divides[v] = d1
           continue
@@ -982,6 +1226,64 @@ def merge_divides_constraints(d0: Divides, d1: Divides) -> Divides:
   return Divides(d0.expr, tuple(tiling_multiple))
 
 
+def _is_valid_register_layout_assignment(
+    shape: tuple[int, ...], layout: fa.FragmentedLayout
+) -> bool:
+  match layout:
+    case fa.WGStridedFragLayout() as strided_layout:
+      return strided_layout.shape == shape
+    case fa.WGSplatFragLayout() as splat_layout:
+      return splat_layout.shape == shape
+    case fa.TiledLayout(tiling=tiling):
+      try:
+        # `tiling.tile_shape` will raise if the shape is not tileable.
+        _ = tiling.tile_shape(shape)
+      except ValueError:
+        return False
+      return True
+    case _:
+      assert_never(layout)
+
+
+def _is_valid_smem_layout_assignment(
+    shape: tuple[int, ...], tiling: lc.TileTransform
+) -> bool:
+  try:
+    # `tiling.transform_shape` will raise if the shape is not tileable.
+    _ = tiling.transform_shape(shape)
+  except ValueError:
+    return False
+  return True
+
+
+def _is_valid_tmem_layout_assignment(
+    shape: tuple[int, ...], layout: tcgen05.TMEMLayout
+) -> bool:
+  try:
+    # `layout.tiling.tile_shape` will raise if the shape is not tileable.
+    _ = layout.tiling.tile_shape(shape)
+  except ValueError:
+    return False
+  return True
+
+
+def is_valid_assignment(var: Variable, layout: Constant) -> bool:
+  match layout:
+    case RegisterLayout(value=reg_layout):
+      assert var.memory_space == MemorySpace.REG
+      return _is_valid_register_layout_assignment(var.shape, reg_layout)
+    case TMEMLayout(value=tmem_layout):
+      assert var.memory_space == MemorySpace.TMEM
+      return _is_valid_tmem_layout_assignment(var.shape, tmem_layout)
+    case SMEMTiling(value=tiling):
+      assert var.memory_space == MemorySpace.SMEM
+      if tiling is None:
+        return True
+      return _is_valid_smem_layout_assignment(var.shape, tiling)
+    case _:
+      raise ValueError(f"Unsupported layout type: {type(layout)}")
+
+
 def _reduce_system_once(
     constraint_system: ConstraintSystem,
 ) -> ConstraintSystem | Unsatisfiable | None:
@@ -1000,6 +1302,8 @@ def _reduce_system_once(
   def try_assign(var: Variable, cst: Constant) -> bool:
     if var in assignments and assignments[var] != cst:
       return False
+    if not is_valid_assignment(var, cst):
+      return False
     assignments[var] = cst
     return True
 
@@ -1015,11 +1319,10 @@ def _reduce_system_once(
         if not try_assign(var, cst):
           return Unsatisfiable()
         changed = True
-      case _ as new_constraint:
-        assert isinstance(new_constraint, Constraint)  # make pytype happy
-        match new_constraint.holds():
+      case new_constraint:
+        match new_constraint.holds():  # pyrefly: ignore[missing-attribute]
           case None:
-            constraints.append(new_constraint)
+            constraints.append(new_constraint)  # pyrefly: ignore[bad-argument-type]
             changed |= new_constraint != constraint
           case False:
             return Unsatisfiable()

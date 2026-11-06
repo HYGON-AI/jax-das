@@ -46,8 +46,6 @@ from jax._src import linear_util as lu
 from jax._src import tree_util
 from jax.custom_derivatives import SymbolicZero
 import jax.numpy as jnp
-from jax._src.lib import jaxlib_extension_version
-from jax._src.lib import ifrt_version
 
 from jax.experimental.custom_partitioning import custom_partitioning
 
@@ -3618,27 +3616,17 @@ class ShardMapTest(jtu.JaxTestCase):
   def test_grad_shmap_residuals_axis_names_in_mesh_order(self):
     # https://github.com/jax-ml/jax/issues/21236
     mesh = jtu.create_mesh((4, 2, 1, 1), ('i', 'j', 'k', 'a'))
+    xs = jnp.arange(16.)
 
-    @partial(
-      shard_map,
-      mesh=mesh,
-      in_specs=P(('i', 'k')),
-      out_specs=P(('i', 'k')),
-      )
+    @shard_map(mesh=mesh, in_specs=P(('i', 'k')), out_specs=P(('i', 'k')))
     def f(x):
       return jnp.sin(x)
 
-    xs = jnp.arange(16.)
-
-    ir = jax.jit(jax.grad(lambda x: f(x).sum())).lower(xs)
+    ir_text = jax.jit(jax.grad(lambda x: f(x).sum())).lower(xs).as_text()
     if config.use_shardy_partitioner.value:
-      self.assertIn(
-          'out_shardings=[<@mesh, [{"i", "k"}]>]', ir.as_text()
-      )
+      self.assertIn('out_shardings=[<@mesh, [{"i", "k"}]>]', ir_text)
     else:
-      self.assertIn(
-          "{jax.result_info = \"[('i', 'k')]\"}", ir.as_text()
-      )
+      self.assertIn("{jax.result_info = \"[('i', 'k')]\"}", ir_text)
 
   def test_dynamic_slice_transpose(self):
     mesh = jtu.create_mesh((2,), ('x',))
@@ -5175,12 +5163,6 @@ class ShardMapTest(jtu.JaxTestCase):
 
   @jtu.with_explicit_mesh((1, 2, 1), ('x', 'y', 'z'))
   def test_unreduced_bwd_manual_reshard_op_shardy(self, mesh):
-    if jaxlib_extension_version < 421:
-      self.skipTest('Requires jaxlib_extension_version >= 421')
-    if ifrt_version < 51:
-      self.skipTest('Requires ifrt_version >= 51')
-    if not jtu.is_cloud_tpu_at_least(2026, 3, 18):
-      self.skipTest('Requires a newer libtpu')
 
     w = jax.device_put(np.ones((4, 32, 16)),
                        P(None, None, 'z', reduced={'x', 'y'}))
@@ -5335,6 +5317,20 @@ class ShardMapTest(jtu.JaxTestCase):
       return jnp.repeat(x, y, total_repeat_length=10)
 
     f(arr1, arr2)  # doesn't crash
+
+  @parameterized.parameters(True, False)
+  @jtu.with_explicit_mesh((2,), 'i')
+  def test_no_auto_pcast_config(self, jit, mesh):
+    @jax.smap(in_axes=(0, None), out_axes=0, axis_name='i')
+    def f(x, y):
+      return x * y
+    if jit:
+      f = jax.jit(f)
+    x = jax.device_put(jnp.zeros((2, 2)), jax.P('i', None))
+    y = jax.device_put(jnp.zeros((2, 2)), jax.P())
+    with self.assertRaisesRegex(ValueError, 'requires varying manual axes to match'):
+      with config.auto_pcast(False):
+        f(x, y)
 
 
 class FunSpec(NamedTuple):

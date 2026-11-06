@@ -20,6 +20,7 @@ import numpy as np
 
 from jax._src import api
 from jax._src import config
+from jax._src import deprecations
 from jax._src import core
 from jax._src import dtypes
 from jax._src import literals
@@ -51,7 +52,7 @@ rocm_plugin_extension = None
 try:
   from importlib.metadata import distributions
   for dist in distributions():
-    name = dist.metadata.get('Name', '')  # pyrefly: ignore[missing-attribute]
+    name = dist.metadata.get('Name', '')
     if name.startswith('jax-rocm') and name.endswith('-plugin'):
       module_name = name.replace('-', '_')
       try:
@@ -103,9 +104,9 @@ def _make_string_array(
 
 
 @export
-def array(object: Any, dtype: DTypeLike | None = None, copy: bool = True,
+def array(object: Any, dtype: DTypeLike | None = None, *args, copy: bool = True,
           order: str | None = "K", ndmin: int = 0,
-          *, device: xc.Device | Sharding | None = None,
+          device: xc.Device | Sharding | None = None,
           out_sharding: NamedSharding | P | None = None) -> Array:
   """Convert an object to a JAX array.
 
@@ -177,8 +178,33 @@ def array(object: Any, dtype: DTypeLike | None = None, copy: bool = True,
 
   .. _explicit sharding: https://docs.jax.dev/en/latest/parallel.html
   """
+  if args:
+    if len(args) > 3:
+      raise TypeError(f"array() takes at most 5 positional arguments but {len(args) + 2} were given")
+
+    for i, name in enumerate(["copy", "order", "ndmin"]):
+      if i < len(args) and [copy, order, ndmin][i] != [True, "K", 0][i]:
+        raise TypeError(f"array() got multiple values for argument '{name}'")
+    copy, order, ndmin = (list(args) + [copy, order, ndmin][len(args):])[:3]
+
+    deprecations.warn(
+        "jax-array-positional-args",
+        "Passing the copy, order, and ndmin arguments to jnp.array positionally "
+        "is deprecated. Use keyword arguments instead.",
+        stacklevel=2)
+
   if order is not None and order != "K":
     raise NotImplementedError("Only implemented for order='K'")
+
+  # Fast path: if we're not actually doing any conversion, in many cases we
+  # can call lax.stage to lift the value into the trace.
+  if dtype is None and device is None and out_sharding is None and ndmin == 0:
+    if isinstance(object, core.Tracer) and not core.is_concrete(object):
+      return lax._array_copy(object) if copy else object
+    if isinstance(object, (int, float, complex, np.number)):
+      return lax.stage(object)
+    if isinstance(object, np.ndarray) and not isinstance(object, np.ma.MaskedArray):
+      return lax.stage(object)
 
   # check if the given dtype is compatible with JAX
   if dtype is not None:
@@ -190,10 +216,8 @@ def array(object: Any, dtype: DTypeLike | None = None, copy: bool = True,
   # array([1, 2, 3])
   weak_type = dtype is None and dtypes.is_weakly_typed(object)
 
-  if device is None and out_sharding is None and isinstance(object, core.Tracer):
-    sharding = object.aval.sharding  # pyrefly: ignore[missing-attribute]
-    sharding = None if sharding.mesh.empty else sharding
-  else:
+  sharding = None
+  if device is not None or out_sharding is not None:
     sharding = util.choose_device_or_out_sharding(device, out_sharding, "jnp.array")
 
   # Use device_put to avoid a copy for ndarray inputs.
@@ -217,7 +241,7 @@ def array(object: Any, dtype: DTypeLike | None = None, copy: bool = True,
     )
 
   # For Python scalar literals, call coerce_to_array to catch any overflow
-  # errors. We don't use dtypes.is_python_scalar because we don't want this
+  # errors. We don't use dtypes.is_weakly_typed_scalar because we don't want this
   # triggering for traced values. We do this here because it matters whether or
   # not dtype is None. We don't assign the result because we want the raw object
   # to be used for type inference below.
@@ -234,8 +258,9 @@ def array(object: Any, dtype: DTypeLike | None = None, copy: bool = True,
     # corresponding data structures and it may not be available as
     # object.dtype. So, we'll resolve the protocols here before
     # evaluating object.dtype.
-    if hasattr(object, '__jax_array__'):
-      object = object.__jax_array__()
+    m = getattr(object, '__jax_array__', None)
+    if m is not None:
+      object = m()
     elif hasattr(object, '__cuda_array_interface__'):
       cai = object.__cuda_array_interface__
       backend = xla_bridge.get_backend()

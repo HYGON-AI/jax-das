@@ -32,11 +32,11 @@ T = TypeVar('T')
 map = safe_map
 
 def add_jaxvals(x: ArrayLike, y: ArrayLike) -> Array:
-  from jax._src.hijax import HiType  # pytype: disable=import-error
+  from jax._src.hijax import HiType  # pyrefly: ignore[missing-import]
   ty = typeof(x)
   if isinstance(ty, HiType):
     return ty.vspace_add(x, y)
-  x, y = core.standard_insert_pvary(x, y)
+  x, y = core.auto_insert_reshard(x, y)
   return add_jaxvals_p.bind(x, y)
 
 add_jaxvals_p = Primitive('add_any')
@@ -53,7 +53,7 @@ def add_abstract(x, y):
   return x
 
 def zeros_like_aval(aval: core.AbstractValue) -> Array:
-  from jax._src.hijax import HiType  # pytype: disable=import-error
+  from jax._src.hijax import HiType  # pyrefly: ignore[missing-import]
   if isinstance(aval, HiType):
     return aval.vspace_zero()
   return aval_zeros_likers[type(aval)](aval)

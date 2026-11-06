@@ -30,6 +30,7 @@ from jax._src import config
 from jax._src import core
 from jax._src import dispatch
 from jax._src import sharding_impls
+from jax._src.cloud_tpu_init import is_cloud_tpu_older_than
 from jax._src.frozen_dict import FrozenDict
 from jax._src.interpreters import batching
 from jax._src.interpreters import mlir
@@ -68,12 +69,14 @@ _MOSAIC_ALLOW_HLO = config.bool_state(
 #    return None
 #
 # We should also add a TODO to remove the conditional one month later.
-_FWD_COMPAT_VERSION = 9
+_FWD_COMPAT_VERSION = 11
 def get_ir_version(ctx: mlir.LoweringRuleContext) -> int | None:
   backend = ctx.module_context.get_backend(optional=True)
   if (
       ctx.is_forward_compat()
       or backend is None
+      # TODO(tlongeri, twsung): Remove after 2026-06-05
+      or is_cloud_tpu_older_than(2026, 5, 5, backend)
   ):
     return _FWD_COMPAT_VERSION
   return None
@@ -385,7 +388,7 @@ def _tpu_custom_call_lowering(
     input_output_aliases: tuple[tuple[int, int], ...],
     metadata: Any | None,
 ) -> ir.OpResultList:
-  result_types = mlir.flatten_ir_types(map(mlir.aval_to_ir_types, out_avals))
+  result_types = mlir.flatten_ir_types([mlir.aval_to_ir_types(ctx.module_context, aval) for aval in out_avals])
   axis_context = ctx.module_context.axis_context
   if isinstance(axis_context, sharding_impls.SPMDAxisContext):
     manual_axes = axis_context.manual_axes | set(axis_context.mesh.manual_axes)
@@ -409,7 +412,7 @@ def _tpu_custom_call_lowering(
     result_shapes = None
   else:
     result_shapes = mlir.flatten_ir_values(
-        mlir.shape_tensor(mlir.eval_dynamic_shape(ctx, aval_out.shape))
+        mlir.shape_tensor(ctx.module_context, mlir.eval_dynamic_shape(ctx, aval_out.shape))
         for aval_out in ctx.avals_out
     )
   extra_attributes: dict[str, ir.Attribute] | None = None
@@ -625,8 +628,8 @@ def _lower_to_custom_call_config(
 ) -> CustomCallBackendConfig:
   device_type = _get_device_type(module)
   needs_hlo_passes = _MOSAIC_ALLOW_HLO.value
-  if needs_layout_passes is None:
-    needs_layout_passes = not device_type
+  # TC kernels always require layout passes.
+  needs_layout_passes = needs_layout_passes or not device_type
   lowered_module_asm, (
       has_communication,
       has_custom_barrier,

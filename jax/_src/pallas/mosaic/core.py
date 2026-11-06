@@ -102,8 +102,6 @@ class CompilerParams:
     internal_scratch_in_bytes: The size of the internal scratch space used by
       Mosaic.
     serialization_format: The serialization format for the kernel body.
-    kernel_type: Specify if the kernel is meant to run on TensorCore or one of
-      the SparseCores
     disable_bounds_checks: Disable bounds checks in the kernel.
     disable_semaphore_checks: Disable semaphore checks in the kernel.
     skip_device_barrier: Skip the default device barrier for the kernel.
@@ -111,6 +109,17 @@ class CompilerParams:
       without a custom barrier.
     use_tc_tiling_on_sc: Use TensorCore tiling for SparseCore. This flag is only
       used for ``SC_*_SUBCORE`` kernels.
+    needs_layout_passes: Whether to use vector layout inference passes. This
+      flag is temporary and will eventually be removed.
+    fuse_transposed_lhs_in_matmul: Hint to compilers to attempt to fuse
+      transposed LHS in MXU if users specify the transposed layout of LHS in
+      matmul operations, e.g., `jnp.einsum('km,kn->mn', lhs, rhs)`; on the other
+      hand, When transposition is performed separately from multiplication (e.g.
+      jnp.matmul(lhs.T, rhs)), this flag does not affect the compiler's decision
+      (it might still decide to do it if obviously profitable). Note that this
+      flag is at the best-effort basis, and the fusion will only be performed
+      when compilers determine it is feasible. Also, the fusion is not always
+      profitable and therefore should be used sparingly.
   """
 
   dimension_semantics: tuple[DimensionSemantics, ...] | None = None
@@ -121,13 +130,14 @@ class CompilerParams:
   flags: dict[str, Any] | None = None
   internal_scratch_in_bytes: int | None = None
   serialization_format: int = 1
-  kernel_type: CoreType = CoreType.TC
   disable_bounds_checks: bool = False
   disable_semaphore_checks: bool = False
   skip_device_barrier: bool = False
   allow_collective_id_without_custom_barrier: bool = False
   shape_invariant_numerics: bool = True
   use_tc_tiling_on_sc: bool | None = None
+  needs_layout_passes: bool = False
+  fuse_transposed_lhs_in_matmul: bool = False
 
   def __init__(
       self,
@@ -139,13 +149,14 @@ class CompilerParams:
       flags: Mapping[str, Any] | None = None,
       internal_scratch_in_bytes: int | None = None,
       serialization_format: int = 1,
-      kernel_type: CoreType = CoreType.TC,
       disable_bounds_checks: bool = False,
       disable_semaphore_checks: bool = False,
       skip_device_barrier: bool = False,
       allow_collective_id_without_custom_barrier: bool = False,
       shape_invariant_numerics: bool = True,
       use_tc_tiling_on_sc: bool | None = None,
+      needs_layout_passes: bool | None = None,
+      fuse_transposed_lhs_in_matmul: bool = False,
   ):
     object.__setattr__(
         self,
@@ -167,7 +178,6 @@ class CompilerParams:
         self, "internal_scratch_in_bytes", internal_scratch_in_bytes
     )
     object.__setattr__(self, "serialization_format", serialization_format)
-    object.__setattr__(self, "kernel_type", kernel_type)
     object.__setattr__(self, "disable_bounds_checks", disable_bounds_checks)
     object.__setattr__(
         self, "disable_semaphore_checks", disable_semaphore_checks
@@ -182,6 +192,12 @@ class CompilerParams:
         self, "shape_invariant_numerics", shape_invariant_numerics
     )
     object.__setattr__(self, "use_tc_tiling_on_sc", use_tc_tiling_on_sc)
+    object.__setattr__(self, "needs_layout_passes", needs_layout_passes)
+    object.__setattr__(
+        self,
+        "fuse_transposed_lhs_in_matmul",
+        fuse_transposed_lhs_in_matmul,
+    )
 
   # Replace is a method, not a field.
   replace = dataclasses.replace
@@ -190,7 +206,7 @@ class CompilerParams:
 class MemoryRef(pallas_core.MemoryRef):
 
   def __matmul__(self, other, /):
-    if not isinstance(other, CoreType):
+    if not isinstance(other, pallas_core.Mesh):
       return NotImplemented
     return dataclasses.replace(self, memory_space=self.memory_space @ other)
 
@@ -217,41 +233,15 @@ class MemorySpace(enum.Enum):
     # A convenience function for constructing MemoryRef types of ShapedArrays.
     return self.from_type(jax_core.ShapedArray(tuple(shape), dtype))
 
+  def like(self, shape_dtype_like):
+    if isinstance(shape_dtype_like, jax_core.AbstractValue):
+      return self.from_type(shape_dtype_like)
+    return self.from_type(jax.typeof(shape_dtype_like))
+
   def __matmul__(self, other, /):
-    if not isinstance(other, CoreType):
+    if not isinstance(other, pallas_core.Mesh):
       return NotImplemented
-    return CoreMemorySpace(self, other)
-
-
-@dataclasses.dataclass(frozen=True)
-class CoreMemorySpace:
-  """A memory space tied to a specific core type."""
-
-  memory_space: MemorySpace
-  core_type: CoreType
-
-  def __post_init__(self):
-    match self.memory_space, self.core_type:
-      case MemorySpace.VMEM, CoreType.TC | CoreType.SC_VECTOR_SUBCORE:
-        ...
-      case MemorySpace.SMEM | MemorySpace.SEMAPHORE, _:
-        ...
-      case MemorySpace.CMEM, CoreType.TC:
-        ...
-      case _, _:
-        raise ValueError(
-            "Unsupported core memory space:"
-            f" {self.memory_space, self.core_type}"
-        )
-
-  def __call__(self, shape: Sequence[int], dtype: jnp.dtype[Any]):
-    return MemoryRef(jax_core.ShapedArray(tuple(shape), dtype), self)
-
-  def __str__(self) -> str:
-    return f"{self.memory_space}@{self.core_type}"
-
-  def __repr__(self) -> str:
-    return f"{self.memory_space!r}@{self.core_type!r}"
+    return pallas_core.CoreMemorySpace(self, other)
 
 
 class dma_semaphore(pallas_core.semaphore_dtype):
@@ -281,9 +271,11 @@ class SemaphoreType(enum.Enum):
     return MemoryRef(jax_core.ShapedArray(shape, self.dtype), MemorySpace.SEMAPHORE)
 
   def __matmul__(self, other, /):
-    if not isinstance(other, CoreType):
+    if not isinstance(other, pallas_core.Mesh):
       return NotImplemented
-    return CoreMemorySpace(MemorySpace.SEMAPHORE, other)((), self.dtype)
+    return pallas_core.CoreMemorySpace(MemorySpace.SEMAPHORE, other)(
+        (), self.dtype
+    )
 
   def get_array_aval(self) -> jax_core.ShapedArray:
     return self(()).get_array_aval()
@@ -343,7 +335,7 @@ class TensorCoreMesh(pallas_core.Mesh):
     )
 
   @property
-  def kernel_type(self) -> CoreType:
+  def core_type(self) -> CoreType:
     return CoreType.TC
 
   @property
@@ -355,8 +347,8 @@ class TensorCoreMesh(pallas_core.Mesh):
     return collections.OrderedDict(zip(self.axis_names, self.devices.shape))
 
   @property
-  def dimension_semantics(self) -> Sequence[str]:
-    return ["parallel"]
+  def dimension_semantics(self) -> Sequence[DimensionSemantics]:
+    return [GridDimensionSemantics.PARALLEL]
 
   def discharges_effect(self, effect: jax_core.Effect) -> Literal[False]:
     del effect
@@ -367,6 +359,16 @@ class TensorCoreMesh(pallas_core.Mesh):
       raise ValueError("You can't use two different TensorCoreMeshes.")
     # TODO: Add support for mpmd with SparseCore meshes.
     return super().check_is_compatible_with(other_mesh)
+
+  @property
+  def supported_memory_spaces(self) -> Sequence[Any]:
+    return [
+        MemorySpace.VMEM,
+        MemorySpace.SMEM,
+        MemorySpace.CMEM,
+        MemorySpace.SEMAPHORE,
+    ]
+
 
 def create_tensorcore_mesh(
     axis_name: str,
@@ -579,19 +581,28 @@ pallas_core._out_shape_to_aval_mapping[SemaphoreType] = (
 
 def memory_space_to_tpu_memory_space(
     memory_space: (
-        MemorySpace | pallas_core.MemorySpace | CoreMemorySpace | None
+        MemorySpace
+        | pallas_core.MemorySpace
+        | pallas_core.CoreMemorySpace
+        | None
     ),
-    kernel_type: CoreType,
-) -> MemorySpace | pallas_core.MemorySpace | CoreMemorySpace:
+    core_type: CoreType,
+) -> MemorySpace | pallas_core.MemorySpace | pallas_core.CoreMemorySpace:
   match memory_space:
     case None:
-      match kernel_type:
+      match core_type:
+        case CoreType.TC:
+          return pallas_core.MemorySpace.ANY
+        case CoreType.SC_SCALAR_SUBCORE | CoreType.SC_VECTOR_SUBCORE:
+          return MemorySpace.HBM
+    case pallas_core.MemorySpace.DEFAULT:
+      match core_type:
         case CoreType.TC | CoreType.SC_VECTOR_SUBCORE:
           return MemorySpace.VMEM
         case CoreType.SC_SCALAR_SUBCORE:
           return MemorySpace.SMEM
         case _:
-          raise ValueError(f"Unsupported kernel type: {kernel_type}")
+          raise ValueError(f"Unsupported core type: {core_type}")
     case pallas_core.MemorySpace.ANY:
       return pallas_core.MemorySpace.ANY
     case pallas_core.MemorySpace.HOST:
@@ -602,10 +613,10 @@ def memory_space_to_tpu_memory_space(
         | pallas_core.MemorySpace.KEY
     ):
       return MemorySpace.SMEM
-    case CoreMemorySpace():
+    case pallas_core.CoreMemorySpace():
       return (
           memory_space.memory_space
-          if memory_space.core_type is kernel_type
+          if memory_space.mesh.core_type is core_type
           else memory_space
       )
     case MemorySpace():

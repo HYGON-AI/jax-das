@@ -16,6 +16,68 @@ When releasing, please add the new-release-boilerplate to docs/pallas/CHANGELOG.
 
 ## Unreleased
 
+* Breaking changes
+  * The deprecated module jax.cloud_tpu_init was removed. This did nothing and
+    references to it can be safely removed.
+  * Support for Python 3.11, NumPy 2.0, and SciPy 1.14 has been dropped, per the
+    [deprecation policy](https://docs.jax.dev/en/latest/deprecation.html).
+
+* Deprecations
+  * Passing 2-dimensional arrays (or mixed 2D and 3D arrays) to {func}`jax.numpy.cross` is deprecated and will be removed in JAX 0.12.0, aligning with NumPy 2.5 behavior.
+
+## JAX 0.10.2 (June 17, 2026)
+
+* New features
+  * Added {func}`jax.scipy.linalg.invhilbert` for the closed-form inverse
+    of the Hilbert matrix ({jax-issue}`#10144`).
+  * Added {func}`jax.scipy.linalg.invpascal` for the inverse of the Pascal
+    matrix ({jax-issue}`#10144`).
+  * Added {func}`jax.scipy.linalg.fiedler_companion` for constructing the
+    pentadiagonal Fiedler companion matrix of a polynomial
+    ({jax-issue}`#10144`).
+  * Added {func}`jax.ShapeDtypeStruct.like` -- a shortcut for constructing a
+    {class}`jax.ShapeDtypeStruct` from an object with `shape` and `dtype`
+    attributes.
+
+## JAX 0.10.1 (May 20, 2026)
+
+* New features
+  * Added `ResizeMethod.AREA` to {func}`jax.image.resize`, which matches
+    TensorFlow's AREA resizing ({jax-issue}`#20098`).
+  * Added {func}`jax.scipy.linalg.hadamard` for constructing Hadamard
+    matrices ({jax-issue}`#10144`).
+  * Added {func}`jax.scipy.linalg.circulant` for constructing circulant
+    matrices ({jax-issue}`#10144`).
+  * Added {func}`jax.scipy.linalg.dft` for constructing discrete Fourier
+    transform matrices ({jax-issue}`#10144`).
+  * Added {func}`jax.scipy.linalg.leslie` for constructing Leslie matrices
+    ({jax-issue}`#10144`).
+  * Added {func}`jax.scipy.linalg.companion` for constructing companion
+    matrices from polynomial coefficients ({jax-issue}`#10144`).
+  * Added {func}`jax.scipy.linalg.fiedler` for constructing symmetric Fiedler
+    matrices ({jax-issue}`#10144`).
+  * Added {func}`jax.scipy.linalg.helmert` for constructing Helmert matrices
+    ({jax-issue}`#10144`).
+  * Moved RNG APIs from "implementations" to dtypes ({jax-issue}`#27854`):
+    * Added `jax.random.key_dtype` to get the dtype corresponding to a PRNG
+      implementation name.
+    * `jax.random.key` and `wrap_key_data` now accept a `dtype` argument.
+
+* Breaking changes
+  * `with mesh:` context manager has been deprecated. Please use
+    `with jax.set_mesh(mesh):` instead.
+
+* Deprecations
+  * Passing the `copy`, `order`, and `ndmin` arguments to
+    {func}`jax.numpy.array` positionally is deprecated. Use keyword arguments
+    instead. This matches the signature of `numpy.array`.
+  * Python `dict_values`, generators, zip return type and iterators generally
+    are deprecated by default when used as leaves in pytrees. In a future
+    version of JAX, this will become an error, if you depend on using them as
+    leaves, pass `is_leaf` to `jax.tree.*` methods.
+
+## JAX 0.10.0 (April 16, 2026)
+
 * New features:
   * Added `ResizeMethod.CUBIC_PYTORCH` to {func}`jax.image.resize` to match
     PyTorch's bicubic resize ({jax-issue}`#15768`).

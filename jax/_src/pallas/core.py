@@ -25,9 +25,10 @@ import enum
 import functools
 import itertools
 import threading
-from typing import Any, ClassVar, Optional, Protocol, TypeAlias, Union, runtime_checkable
+from typing import Any, ClassVar, Protocol, TypeAlias, Union, runtime_checkable
 
 from jax._src import api_util
+from jax._src import checkify
 from jax._src import config
 from jax._src import core as jax_core
 from jax._src import dtypes
@@ -145,6 +146,32 @@ class CompilerParams(Protocol):
   __dataclass_fields__: ClassVar[dict[str, dataclasses.Field[Any]]]
 
 
+_ENABLE_DEBUG_CHECKS = config.bool_state(
+    "jax_pallas_enable_debug_checks",
+    default=False,
+    help=(
+        "If set, ``pl.debug_check`` calls are checked at runtime. Otherwise,"
+        " they are a noop."
+    ),
+)
+
+
+enable_debug_checks = _ENABLE_DEBUG_CHECKS
+
+
+def debug_checks_enabled() -> bool:
+  """Returns runtime checks are enabled."""
+  return _ENABLE_DEBUG_CHECKS.value
+
+
+def debug_check(condition, message):
+  """Check the condition if
+  :func:`~jax.experimental.pallas.enable_debug_checks` is set, otherwise
+  do nothing.
+  """
+  return checkify.debug_check(condition, message)
+
+
 _backend_lowering_rules = {}
 
 
@@ -204,11 +231,21 @@ class Buffered:
   """
   buffer_count: int
   use_lookahead: bool = False
-  revisit: Optional[RevisitMode] = None
+  revisit: RevisitMode | None = None
+
+
+@runtime_checkable
+class MemoryRefBase(Protocol):
+
+  def get_array_aval(self) -> jax_core.ShapedArray:
+    ...
+
+  def get_ref_aval(self) -> TransformedRef | state.AbstractRef:
+    ...
 
 
 @dataclasses.dataclass(frozen=True)
-class MemoryRef:
+class MemoryRef(MemoryRefBase):
   """Like jax.ShapeDtypeStruct but with memory spaces."""
   inner_aval: jax_core.AbstractValue
   # TODO(b/368122763): Unify memory space types across backends
@@ -224,8 +261,6 @@ class MemoryRef:
     return self.inner_aval.update(dtype=dtype, memory_space=self.memory_space)
 
   def get_ref_aval(self) -> TransformedRef | state.AbstractRef:
-    # TODO(sharadmv): Clean this up. ShapedArrayWithMemorySpace fails when we
-    # try to apply JAX ops to it.
     return state.AbstractRef(self.inner_aval, self.memory_space)
 
   @property
@@ -248,6 +283,7 @@ class MemorySpace(enum.Enum):
   type during lowering.
   """
   ANY = "any"  # Unrestricted memory space (usually HBM)
+  DEFAULT = "default"  # Default memory space (decided by backend)
   ERROR = "error"  # Memory space for checkify errors.
   INDEX = "index"  # Memory space for scalar prefetch arguments.
   KEY = "key"  # Memory space for PRNG keys.
@@ -260,9 +296,36 @@ class MemorySpace(enum.Enum):
     # A convenience function for constructing MemoryRef types of ShapedArrays.
     return self.from_type(jax_core.ShapedArray(shape, dtype))
 
-
   def __str__(self) -> str:
     return self.value
+
+
+@dataclasses.dataclass(frozen=True)
+class CoreMemorySpace:
+  """A memory space tied to a Pallas mesh."""
+
+  memory_space: Any
+  mesh: Mesh
+
+  def __post_init__(self):
+    if not self.memory_space in self.mesh.supported_memory_spaces:
+      raise ValueError(
+          f"Memory space {self.memory_space} is not supported by mesh"
+          f" {self.mesh}"
+      )
+
+  def __call__(self, shape: Sequence[int], dtype: jnp.dtype[Any]):
+    return MemoryRef(jax_core.ShapedArray(tuple(shape), dtype), self)
+
+  def __str__(self) -> str:
+    return f"{self.memory_space}@{self.mesh.core_type}"
+
+  def __repr__(self) -> str:
+    return f"{self.memory_space!r}@{self.mesh.core_type!r}"
+
+  @property
+  def name(self) -> Any:
+    return f"{self.memory_space}@{self.mesh.core_type.name}"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -362,7 +425,20 @@ class BoundedSlice:
   def __repr__(self):
     return f"BoundedSlice({self.block_size})"
 
-BlockDim: TypeAlias = Element | Squeezed | Blocked | BoundedSlice
+
+@dataclasses.dataclass(frozen=True)
+class Indirect:
+  """A dimension indexed by an array of indices.
+
+  Implies a gather for inputs and a scatter for outputs.
+  """
+  block_size: int
+
+  def __repr__(self):
+    return f"Indirect({self.block_size})"
+
+
+BlockDim: TypeAlias = Element | Squeezed | Blocked | BoundedSlice | Indirect
 
 
 def default_index_map(ndim: int) -> Callable:
@@ -375,7 +451,7 @@ def _canonicalize_block_dim(dim: BlockDim | int | None) -> BlockDim:
       return squeezed
     case int():
       return Blocked(int(dim))
-    case Squeezed() | Blocked() | Element() | BoundedSlice():
+    case Squeezed() | Blocked() | Element() | BoundedSlice() | Indirect():
       return dim
     case _:
       # Handle case where the dim is a symbolic dimension so we assume it is
@@ -399,11 +475,12 @@ def _get_block_dim_size(dim: BlockDim) -> int:
   match dim:
     case Squeezed():
       return 1
-    case Blocked(block_size):
-      return block_size
-    case Element():
-      return dim.block_size
-    case BoundedSlice(block_size):
+    case (
+        Blocked(block_size)
+        | Element(block_size)
+        | BoundedSlice(block_size)
+        | Indirect(block_size)
+    ):
       return block_size
     case _:
       raise ValueError(f"Unsupported block shape type: {type(dim)}")
@@ -415,7 +492,10 @@ def get_block_size(dim: BlockDim | int | None) -> int:
     case Squeezed() | None:
       return 1
     case (
-        Blocked(block_size) | Element(block_size, _) | BoundedSlice(block_size)
+        Blocked(block_size)
+        | Element(block_size)
+        | BoundedSlice(block_size)
+        | Indirect(block_size)
     ):
       return block_size
     case _:
@@ -532,7 +612,10 @@ class BlockSpec:
       block_array_aval = array_aval.inner_aval.update(shape=ref_block_shape)
     else:
       block_array_aval = array_aval.update(shape=ref_block_shape)
-    block_aval = state.AbstractRef(block_array_aval, self.memory_space)
+    memory_space = self.memory_space
+    if memory_space is None:
+      memory_space = MemorySpace.DEFAULT
+    block_aval = state.AbstractRef(block_array_aval, memory_space)
 
     if (
         not jax_core.is_constant_shape(block_aval.shape)
@@ -1164,14 +1247,13 @@ def get_grid_mapping(
     out_tree: tree_util.PyTreeDef,
     out_origins: Sequence[OriginStr],
     debug: bool = False,
-    default_memory_space: Any = None,
 ) -> tuple[tuple[jax_core.AbstractValue, ...], GridMapping]:
   if dynamic_shapes_export_enabled():
     dim_check: Any = jax_core.is_dim
   else:
     dim_check: Any = jax_core.is_constant_dim
   assert all(i is None or dim_check(i) for i in grid_spec.grid)
-  grid_mapping_grid: GridMappingGrid = tuple(
+  grid_mapping_grid: GridMappingGrid = tuple(  # pyrefly: ignore[bad-assignment]
       dynamic_grid_dim if (  # pyrefly: ignore[bad-argument-type]
           d is None or (not jax_core.is_constant_dim(d) and not dynamic_shapes_export_enabled())
       ) else d
@@ -1219,9 +1301,9 @@ def get_grid_mapping(
 
   def _with_default_memory_space(bs: BlockSpec):
     if bs is no_block_spec:
-      return BlockSpec(memory_space=default_memory_space)
+      return BlockSpec(memory_space=MemorySpace.DEFAULT)
     elif bs.memory_space is None:
-      return bs.replace(memory_space=default_memory_space)
+      return bs.replace(memory_space=MemorySpace.DEFAULT)
     else:
       return bs
 
@@ -1234,7 +1316,7 @@ def get_grid_mapping(
     flat_in_specs = [_with_default_memory_space(bs) for bs in flat_in_specs]
   else:
     flat_in_specs = (
-        [BlockSpec(memory_space=default_memory_space)] * len(in_avals))
+        [BlockSpec(memory_space=MemorySpace.DEFAULT)] * len(in_avals))
 
   in_block_mappings = map(
       partial(
@@ -1259,7 +1341,7 @@ def get_grid_mapping(
     flat_out_specs = [_with_default_memory_space(bs) for bs in flat_out_specs]
   else:
     flat_out_specs = (
-        [BlockSpec(memory_space=default_memory_space)] * len(out_avals))
+        [BlockSpec(memory_space=MemorySpace.DEFAULT)] * len(out_avals))
 
   out_block_mappings = map(
       partial(
@@ -1434,6 +1516,9 @@ def core_map(
       and dict format. The space will be core-local unless the memory space type
       is specified to be shared (e.g., VMEM_SHARED).
   """
+  interpret = (
+      config.pallas_tpu_interpret_mode_context_manager.value or interpret)
+
   def wrapped(f):
     if isinstance(scratch_shapes, dict):
       fun_args = ((), scratch_shapes)
@@ -1494,6 +1579,8 @@ effects.remat_allowed_effects.add_type(CommsEffect)
 effects.custom_derivatives_allowed_effects.add_type(CommsEffect)
 
 kernel_local_effects: effects.EffectTypeSet = effects.EffectTypeSet()
+kernel_local_effects.add_type(jax_core.InternalMutableArrayEffect)
+kernel_local_effects.add_type(CommsEffect)
 
 
 def get_interpret_effects(interpret: Any) -> Set[effects.Effect]:
@@ -1545,6 +1632,7 @@ mlir.register_lowering(core_map_p, core_map_lowering_rule)
 CoreType = Any  # TODO(rdyro): Unify this among backends.
 
 
+@runtime_checkable
 class Mesh(Protocol):
 
   @property
@@ -1556,8 +1644,7 @@ class Mesh(Protocol):
     ...
 
   @property
-  def kernel_type(self) -> CoreType:
-    # TODO(rdyro): Rename kernel_type property to core_type.
+  def core_type(self) -> CoreType:
     # the CoreType of the Mesh (e.g.,TensorCore, SpearCore-SCS, SpearCore-TEC)
     ...
 
@@ -1572,6 +1659,11 @@ class Mesh(Protocol):
     compatible with itself.
     """
     raise ValueError(f"Mesh {self=} is not compatible with {other_mesh=}.")
+
+  @property
+  def supported_memory_spaces(self) -> Sequence[Any]:
+    """Return the memory spaces supported by the mesh."""
+
 
 _core_map_mesh_rules: dict[type[Any], Callable[..., Any]] = {}
 
@@ -1639,7 +1731,7 @@ def default_mesh_discharge_rule(
   ]
 
   scratch_avals = [v.aval for v in jaxpr.invars]
-  scratch_shapes = tuple(
+  scratch_types = tuple(
       MemoryRef(v.inner_aval, v.memory_space) for v in scratch_avals
   )
 
@@ -1652,13 +1744,14 @@ def default_mesh_discharge_rule(
     jax_core.eval_jaxpr(jaxpr, in_refs, *scratch_refs)
 
   from jax._src.pallas import mpmd  # Avoid circular dependency.
+
   outs = mpmd._mpmd_map(
       [(mesh, body)],
-      out_shapes=tuple(_get_sds(in_avals[idx]) for idx in modified_idxs),
+      out_types=tuple(_get_sds(in_avals[idx]) for idx in modified_idxs),
       input_output_aliases={
           in_idx: out_idx for out_idx, in_idx in enumerate(modified_idxs)
       },
-      scratch_shapes=scratch_shapes,
+      scratch_types=scratch_types,
       compiler_params=compiler_params,
       interpret=interpret,
       debug=debug,
@@ -1668,7 +1761,7 @@ def default_mesh_discharge_rule(
   )(*args)
 
   # ``outs`` lacks the unmodified inputs. Add them back in.
-  all_outs = [None] * len(args)
+  all_outs = [None] * len(args)  # pyrefly: ignore[unsupported-assignment]
   for out_idx, in_idx in enumerate(modified_idxs):
     all_outs[in_idx] = outs[out_idx]
   return all_outs, ()

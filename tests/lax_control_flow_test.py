@@ -119,9 +119,9 @@ prim_non_existent_custom_call = core.Primitive("__testing_non_existent_custom_ca
 prim_non_existent_custom_call.def_abstract_eval(lambda x_aval: x_aval)
 mlir.register_lowering(
     prim_non_existent_custom_call,
-    lambda ctx, x: mlir.hlo.CustomCallOp(
+    lambda ctx, x: mlir.hlo.custom_call(
         [x.type], [x],
-        call_target_name=mlir.ir.StringAttr.get("__testing_non_existent_custom_call")).results)
+        call_target_name=mlir.ir.StringAttr.get("__testing_non_existent_custom_call")))
 batching.primitive_batchers[prim_non_existent_custom_call] = (
     lambda batched_args, batch_dims: (prim_non_existent_custom_call.bind(batched_args[0]),
                                       batch_dims[0]))
@@ -134,7 +134,7 @@ def prim_with_lowering_error_lowering(platform: str,
                                       only_on: str):
   if platform != only_on:
     raise ValueError(f"prim_with_lowering_error with only_on={only_on} lowered for {platform}")
-  return mlir.hlo.SineOp(x).results
+  return [mlir.hlo.sine(x)]
 def prim_with_lowering_error_batch_rule(batched_args, batch_dims, **params):
   xs, = batched_args
   xs_bdim, = batch_dims
@@ -408,7 +408,7 @@ class LaxControlFlowTest(jtu.JaxTestCase):
       return total
 
     cfun = jax.jit(sum_first_n)
-    x = self.rng().randn(10).astype(jnp.float_)
+    x = self.rng().randn(10).astype(float)
 
     for num in [0, 5, 10, 15]:
       self.assertAllClose(sum_first_n(x, num), np.sum(x[:num]),
@@ -666,7 +666,7 @@ class LaxControlFlowTest(jtu.JaxTestCase):
       return total
 
     cfun = jax.jit(sum_first_n)
-    x = self.rng().randn(10).astype(jnp.float_)
+    x = self.rng().randn(10).astype(float)
 
     for num in [0, 5, 10, 15]:
       self.assertAllClose(sum_first_n(x, num), np.sum(x[:num]),
@@ -686,7 +686,7 @@ class LaxControlFlowTest(jtu.JaxTestCase):
       return out_val['total']
 
     cfun = jax.jit(sum_first_n)
-    x = self.rng().randn(10).astype(jnp.float_)
+    x = self.rng().randn(10).astype(float)
 
     for num in [0, 5, 10, 15]:
       self.assertAllClose(sum_first_n(x, num), np.sum(x[:num]),
@@ -706,7 +706,7 @@ class LaxControlFlowTest(jtu.JaxTestCase):
       return tot
 
     cfun = jax.jit(sum_first_n)
-    x = self.rng().randn(10).astype(jnp.float_)
+    x = self.rng().randn(10).astype(float)
 
     for num in [0, 5, 10, 15]:
       self.assertAllClose(sum_first_n(x, num), np.sum(x[:num]),
@@ -1851,12 +1851,12 @@ class LaxControlFlowTest(jtu.JaxTestCase):
     n_out = 1
     length = 3
 
-    W_trans = r.randn(n_hid, n_hid + n_in).astype(jnp.float_)
-    W_out = r.randn(n_out, n_hid + n_in).astype(jnp.float_)
+    W_trans = r.randn(n_hid, n_hid + n_in).astype(float)
+    W_out = r.randn(n_out, n_hid + n_in).astype(float)
     params = W_trans, W_out
 
-    inputs = r.randn(length, n_in).astype(jnp.float_)
-    targets = r.randn(length, n_out).astype(jnp.float_)
+    inputs = r.randn(length, n_in).astype(float)
+    targets = r.randn(length, n_out).astype(float)
 
     def step(params, state, input):
       W_trans, W_out = params
@@ -1900,8 +1900,8 @@ class LaxControlFlowTest(jtu.JaxTestCase):
 
     # we can vmap to batch things
     batch_size = 7
-    batched_inputs = r.randn(batch_size, length, n_in).astype(jnp.float_)
-    batched_targets = r.randn(batch_size, length, n_out).astype(jnp.float_)
+    batched_inputs = r.randn(batch_size, length, n_in).astype(float)
+    batched_targets = r.randn(batch_size, length, n_out).astype(float)
     batched_loss = jax.vmap(lambda x, y: loss(params, x, y))
     losses = batched_loss(batched_inputs, batched_targets)
     expected = np.stack(list(map(lambda x, y: loss(params, x, y),

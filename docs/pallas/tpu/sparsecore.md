@@ -1,3 +1,17 @@
+---
+jupytext:
+  formats: ipynb,md:myst
+  text_representation:
+    extension: .md
+    format_name: myst
+    format_version: 0.13
+    jupytext_version: 1.16.4
+kernelspec:
+  display_name: Python 3 (ipykernel)
+  language: python
+  name: python3
+---
+
 # SparseCore Kernel Writing
 
 [SparseCores](https://openxla.org/xla/sparsecore) specialize in sparse memory
@@ -143,9 +157,9 @@ scalar operations.
 ```python
 @jax.jit
 def cumsum(x):
-  @pl.kernel(out_shape=x, mesh=scalar_mesh,
-             scratch_shapes=[pltpu.SMEM((x.shape[1],), x.dtype),
-                             pltpu.SemaphoreType.DMA])
+  @pl.kernel(out_type=x, mesh=scalar_mesh,
+             scratch_types=[pltpu.SMEM((x.shape[1],), x.dtype),
+                            pltpu.SemaphoreType.DMA])
   def kernel(x_ref, o_ref, tmp_ref, sem):
     idx = jax.lax.axis_index('core')
     pltpu.async_copy(x_ref.at[idx], tmp_ref, sem).wait()
@@ -175,7 +189,7 @@ dma_block = (8, 128)
 
 @jax.jit
 def sc_add_one(x):
-  @pl.kernel(out_shape=x, mesh=vector_mesh, scratch_shapes=[])
+  @pl.kernel(out_type=x, mesh=vector_mesh, scratch_types=[])
   def sc_add_one_kernel(x_hbm_ref, o_hbm_ref):
     in_shape = x_hbm_ref.shape
 
@@ -270,7 +284,7 @@ indices = jax.random.randint(jax.random.key(0), (num_indices,), 0, batch_size,
 @jax.jit
 def gather(x, indices):
   indices = indices.reshape((1, num_indices))
-  @pl.kernel(out_shape=jax.ShapeDtypeStruct((num_indices, value_dim), x.dtype),
+  @pl.kernel(out_type=jax.ShapeDtypeStruct((num_indices, value_dim), x.dtype),
              mesh=vector_mesh)
   def kernel(x_hbm, i_hbm, o_hbm):
     def body(i_vmem, o_vmem):
@@ -294,52 +308,6 @@ np.testing.assert_array_equal(out, jnp.take(x, indices, axis=0))
 
 ```
 
-If you are doing indexed retrieval at the beginning of a kernel, you could use
-the `indexed_by` and `indexed_dim` argument of `plsc.BlockSpec` on the top-level
-`pl.pallas_call` to refer to another input as the indices of this input on this
-axis.
-
-This call will parallelize the DMA from HBM to VMEM and the gather operation
-that does the indexed lookup, resulting in 4 pipeline stages: indices copy-in,
-gather, kernel computation and output copy-out. This allows you to overlap
-gather and any further computation on gathered outputs.
-
-Note that the `plsc.BlockSpec` is experimental and subject to change.
-
-```python
-@jax.jit
-def gather_add_one(x, indices):
-  @partial(
-      pl.pallas_call,
-      out_shape=jax.ShapeDtypeStruct((num_indices, value_dim), x.dtype),
-      grid=(num_indices // gather_window_size,),
-      in_specs=(
-          plsc.BlockSpec((gather_window_size, value_dim),
-                         indexed_by=1, indexed_dim=0),
-          pl.BlockSpec((gather_window_size,), lambda i: i),
-      ),
-      out_specs=pl.BlockSpec((gather_window_size, value_dim), lambda i: (i, 0)),
-      compiler_params=pltpu.CompilerParams(
-          kernel_type=pltpu.CoreType.SC_VECTOR_SUBCORE,
-          dimension_semantics=(pltpu.PARALLEL,),
-      ),
-  )
-  def kernel(gathered_ref, _, o_ref):
-    # gathered_ref is the gathered content of x[indices]
-    @pl.loop(0, gather_window_size)
-    def _(c0):
-      @pl.loop(0, o_ref.shape[1], step=16)
-      def _(c1):
-        slc = (pl.ds(c0, 1), pl.ds(c1, 16))
-        o_ref.at[*slc][...] = gathered_ref.at[*slc][...] + 1
-
-  return kernel(x, indices)
-
-out = gather_add_one(x, indices)
-np.testing.assert_array_equal(out, jnp.take(x, indices, axis=0) + 1)
-
-```
-
 A scatter (indexed overwrite) is the opposite of a gather. See an example kernel
 below.
 
@@ -347,8 +315,8 @@ below.
 @jax.jit
 def scatter(x, indices):
   indices = indices.reshape((1, num_indices))
-  @pl.kernel(out_shape=jax.ShapeDtypeStruct((batch_size, value_dim), x.dtype),
-             mesh=vector_mesh, scratch_shapes=[])
+  @pl.kernel(out_type=jax.ShapeDtypeStruct((batch_size, value_dim), x.dtype),
+             mesh=vector_mesh, scratch_types=[])
   def kernel(x_hbm, i_hbm, o_hbm):
     def body(x_vmem, i_vmem):
       pltpu.sync_copy(x_vmem, o_hbm.at[i_vmem.at[0]])  # The scatter op

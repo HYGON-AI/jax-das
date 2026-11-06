@@ -250,7 +250,7 @@ JAX_COMPOUND_OP_RECORDS = [
     op_record("polyval", 2,
               [d for d in number_dtypes if d not in (np.int8, np.uint8)],
               nonempty_nonscalar_array_shapes,
-              jtu.rand_default, [], check_dtypes=False,
+              jtu.rand_default, [], check_dtypes=True,
               tolerance={dtypes.bfloat16: 4e-2, np.float16: 2e-2,
                          np.float64: 1e-12}),
     op_record("positive", 1, number_dtypes, all_shapes, jtu.rand_default, ["rev"]),

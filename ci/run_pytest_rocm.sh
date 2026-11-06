@@ -42,7 +42,6 @@ set +e
 "$JAXCI_PYTHON" -m pytest -n $num_processes --tb=short \
 --json-report --json-report-file=${LOGS_DIR}/pytest_results_single.json \
 --junitxml=test-artifacts/junit-single.xml \
---dist=loadfile \
 -m "not multiaccelerator" \
 $rocm_pytest_deselect \
 tests

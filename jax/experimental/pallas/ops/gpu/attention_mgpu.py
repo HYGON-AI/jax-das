@@ -337,7 +337,7 @@ def _attention_forward(q, k, v, config: TuningConfig, save_residuals: bool = Fal
   return out
 
 @partial(jax.custom_vjp, nondiff_argnums=(3, 4))
-@partial(jax.jit, static_argnames=["config", "save_residuals"])
+@jax.jit(static_argnames=["config", "save_residuals"])
 def attention(q, k, v, config: TuningConfig, save_residuals: bool = False):
   return _attention_forward(q, k, v, config, save_residuals)
 
@@ -647,7 +647,7 @@ def _attention_bwd(config: TuningConfig, save_residuals: bool, res, do):
 
 attention.defvjp(_attention_fwd, _attention_bwd)
 
-@functools.partial(jax.jit, static_argnames=["config", "save_residuals"])
+@jax.jit(static_argnames=["config", "save_residuals"])
 def attention_with_pipeline_emitter(q, k, v, config: TuningConfig, save_residuals=False):
   if config.causal:
     raise NotImplementedError("Causal attention is not supported with the pipeline emitter yet.")
@@ -811,7 +811,7 @@ def attention_with_pipeline_emitter(q, k, v, config: TuningConfig, save_residual
   return out
 
 
-@functools.partial(jax.jit, static_argnames=["causal", "save_residuals"])
+@jax.jit(static_argnames=["causal", "save_residuals"])
 def attention_reference(q, k, v, causal=False, save_residuals=False):
   batch_size, q_seq_len, num_q_heads, head_dim = q.shape
   kv_seq_len, num_kv_heads = k.shape[1], k.shape[2]

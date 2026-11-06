@@ -18,23 +18,27 @@ import dataclasses
 from functools import partial
 from typing import Any
 
-import numpy as np
-
 from jax._src import config
 from jax._src import core
-from jax._src.core import typeof
-from jax._src import source_info_util
 from jax._src import linear_util as lu
-from jax._src.partition_spec import PartitionSpec as P
 from jax._src import mesh as mesh_lib
-from jax._src.ad_util import Zero, SymbolicZero, add_jaxvals, add_jaxvals_p
-from jax._src.core import Trace, Tracer, TraceTag
+from jax._src import source_info_util
+from jax._src.ad_util import SymbolicZero, Zero, add_jaxvals, add_jaxvals_p
+from jax._src.core import Trace, TraceTag, Tracer
+from jax._src.core import typeof
 from jax._src.interpreters import partial_eval as pe
-from jax._src.tree_util import (tree_unflatten, tree_flatten, PyTreeDef)
+from jax._src.partition_spec import PartitionSpec as P
+from jax._src.tree_util import (
+    FlatTree,
+    PyTreeDef,
+    tree_flatten,
+    tree_unflatten,
+)
 from jax._src.typing import Array
-from jax._src.util import (unzip2, safe_map, safe_zip, split_list,
-                           canonicalize_axis, moveaxis, memoize,
-                           weakref_lru_cache, tuple_insert)
+from jax._src.util import (
+                           canonicalize_axis, memoize, moveaxis, safe_map, safe_zip, split_list, tuple_insert,unzip2,
+                           weakref_lru_cache)
+import numpy as np
 
 map, unsafe_map = safe_map, map
 zip, unsafe_zip = safe_zip, zip
@@ -52,7 +56,7 @@ FromEltHandler = Callable[[Callable, AxisSize, Elt, MapSpec], Vmappable]
 MakeIotaHandler = Callable[[AxisSize], Array]
 
 def to_elt(trace: BatchTrace, get_idx: GetIdx, x: Vmappable, spec: MapSpec) -> Elt:
-  from jax._src import hijax  # pytype: disable=import-error
+  from jax._src import hijax  # pyrefly: ignore[missing-module-attribute]
   handler = to_elt_handlers.get(type(x))
   if handler:
     return handler(partial(to_elt, trace, get_idx), get_idx, x, spec)
@@ -88,7 +92,7 @@ from_elt_handlers: dict[type, FromEltHandler] = {}
 def make_iota(axis_size: AxisSize) -> Array:
   # Callers of this utility, via batch() or vtile(), must be in a context
   # where lax is importable.
-  from jax import lax  # pytype: disable=import-error
+  from jax import lax  # pyrefly: ignore[missing-module-attribute]
   handler = make_iota_handlers.get(type(axis_size))
   if handler:
     return handler(axis_size)
@@ -137,7 +141,7 @@ class BatchTracer(Tracer['BatchTrace']):
 
   def __init__(self, trace: BatchTrace, val, batch_dim: NotMapped | int,
                source_info: source_info_util.SourceInfo | None = None):
-    from jax._src import hijax  # pytype: disable=import-error
+    from jax._src import hijax  # pyrefly: ignore[missing-module-attribute]
 
     aval = core.typeof(val)
     if config.enable_checks.value:
@@ -249,6 +253,11 @@ class BatchTrace(Trace):
     val, _ = self.to_batch_info(x)
     with core.set_current_trace(self.parent_trace):
       return core.cur_qdd(val)
+
+  def stage_value(self, val):
+    if isinstance(val, BatchTracer) and val._trace.tag is self.tag:
+      return val
+    return self.parent_trace.stage_value(val)
 
   def process_primitive(self, p, tracers, params, /):
     vals_in, dims_in = unzip2(map(self.to_batch_info, tracers))
@@ -421,8 +430,14 @@ def _batch_jaxpr2(
               varying=aval.mat.varying  | frozenset(axis_data.spmd_name))  # pyrefly: ignore[missing-attribute]
           aval = aval.update(manual_axis_type=mat)
       avals_in2.append(aval)
-  jaxpr_out, _, consts = pe.trace_to_jaxpr_dynamic(f, avals_in2)
-  return core.ClosedJaxpr(jaxpr_out, consts), out_axes()
+
+  def flat_fun(*args):
+    return f.call_wrapped(*args)
+
+  closed_jaxpr_out, _ = pe.trace_to_jaxpr(
+      flat_fun, FlatTree.flatten_args(*avals_in2), closed_jaxpr.jaxpr.debug_info
+  )
+  return closed_jaxpr_out, out_axes()
 
 def batch_jaxpr(closed_jaxpr, axis_data, in_batched, instantiate):
   inst = tuple(instantiate) if isinstance(instantiate, list) else instantiate
@@ -454,8 +469,13 @@ def _batch_jaxpr_axes(closed_jaxpr: core.ClosedJaxpr,
                                  axis_data.explicit_mesh_axis)
               if b is not not_mapped
               else aval for aval, b in unsafe_zip(closed_jaxpr.in_avals, in_axes)]
-  jaxpr_out, _, consts = pe.trace_to_jaxpr_dynamic(f, avals_in)
-  return core.ClosedJaxpr(jaxpr_out, consts), out_batched()
+  def flat_fun(*args):
+    return f.call_wrapped(*args)
+
+  closed_jaxpr_out, _ = pe.trace_to_jaxpr(
+      flat_fun, FlatTree.flatten_args(*avals_in), closed_jaxpr.jaxpr.debug_info
+  )
+  return closed_jaxpr_out, out_batched()
 
 @lu.transformation_with_aux2
 def _batch_jaxpr_inner(f, store, axis_data, tag, in_axes, *in_vals):
@@ -645,7 +665,7 @@ def broadcast_batcher(prim, axis_data, args, dims, **params):
 def _handle_scalar_broadcasting(nd, x, d):
   # Callers of this utility, via broadcast_batcher() or defbroadcasting(),
   # must be in a context where lax is importable.
-  from jax import lax  # pytype: disable=import-error
+  from jax import lax  # pyrefly: ignore[missing-module-attribute]
   return (x if d is not_mapped or nd == np.ndim(x) else
           lax.expand_dims(x, tuple(range(np.ndim(x), nd))))
 
@@ -687,7 +707,7 @@ def expand_dims_batcher(prim, args, dims, **params):
 
 def broadcast(x, sz, axis, mesh_axis):
   # Callers of this utility must be in a context where lax is importable.
-  from jax import lax  # pytype: disable=import-error
+  from jax import lax  # pyrefly: ignore[missing-module-attribute]
   shape = list(np.shape(x))
   shape.insert(axis, sz)
   broadcast_dims = tuple(np.delete(np.arange(len(shape)), axis))
@@ -704,6 +724,8 @@ def broadcast(x, sz, axis, mesh_axis):
     return x
 
 def spmd_names_insert_pvary(*args):
+  if not config.auto_pcast.value:
+    return args
   if (config._check_vma.value and
       (spmd_names := core.get_axis_env().spmd_axis_names)):
     return [core.pvary(a, tuple(spmd_names - aval.mat.varying))

@@ -13,6 +13,49 @@ Remember to align the itemized text with the first line of an item within a list
 
 ## Unreleased
 
+* Changes
+
+  * Added {func}`jax.experimental.pallas.align_to`, a utility that rounds a
+    value up to the nearest multiple of a given alignment.
+  * {func}`jax.experimental.pallas.pallas_call` no longer supports checkify.
+    We expect this change to affect few users, as in our experience most
+    kernels either perform no checking or use
+    {func}`jax.experimental.pallas.debug_check` for conditionally-enabled
+    runtime checks.
+  * {func}`jax.experimental.pallas.kernel` now always aliases Refs that are
+    passed in or closed-over.
+
+### TPU
+
+* Removals
+
+  * Removed the `kernel_type` field from
+    {class}`jax.experimental.pallas.tpu.CompilerParams`. It was only used for
+    writing SparseCore kernels via {func}`jax.experimental.pallas.pallas_call`,
+    which is now unsupported. The recommended API for SparseCore kernels is
+    {func}`jax.experimental.pallas.kernel`.
+
+
+### Mosaic GPU
+
+* New features
+
+  * Added `barrier_test` function; a non-blocking equivalent of `barrier_wait`
+    only supported in a warp context.
+
+* Changes
+
+  * Breaking change: removed `plgpu.TransposeTransform`.
+
+## Released with JAX 0.10.0
+
+* Changes
+
+  * Breaking change: refactored `pl.kernel` to use `out_type` instead of
+    `out_shape` and `scratch_types` instead of `scratch_shapes`. Existing
+    usages calling {func}`jax.experimental.pallas.kernel` with these keyword
+    arguments must be updated.
+
 ### TPU
 
 * Deprecations

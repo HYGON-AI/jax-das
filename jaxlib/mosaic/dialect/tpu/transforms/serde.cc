@@ -126,6 +126,24 @@ LogicalResult enqueue_dma_upgrade(Operation* op, int version, bool&) {
 }
 
 LogicalResult enqueue_dma_downgrade(Operation* op, int version, bool&) {
+  if (version < 12) {
+    auto segment_attr = op->getAttrOfType<DenseI32ArrayAttr>(
+        OpTrait::AttrSizedOperandSegments<
+            EnqueueDMAOp>::getOperandSegmentSizeAttr());
+    if (!segment_attr) {
+      return op->emitError("Missing or invalid AttrSizedOperandSegments");
+    }
+    const ArrayRef<int32_t> sizes = segment_attr.asArrayRef();
+    if (sizes.size() != 6) {
+      return op->emitError(
+          "Unexpected size of AttrSizedOperandSegments for enqueue_dma");
+    }
+    if (sizes[3] == 0) {
+      return op->emitError(
+          "Cannot downgrade enqueue_dma without target_semaphore to version "
+          "< 12");
+    }
+  }
   if (version < 8) {
     auto ordering_attr = op->getAttrOfType<BoolAttr>("strict_ordering");
     if (ordering_attr != nullptr) {
@@ -319,6 +337,41 @@ LogicalResult arith_constant_downgrade(Operation* op, int version, bool&) {
   return success();
 }
 
+LogicalResult reinterpret_cast_downgrade(Operation* op, int version, bool&) {
+  if (version < 12) {
+    if (op->getNumOperands() == 2) {
+      return op->emitOpError(
+          "Can only downgrade below version 12 when dynamic_offset is not set");
+    }
+  }
+  return success();
+}
+
+LogicalResult matmul_upgrade(Operation* op, int version, bool&) {
+  if (version < 13) {
+    op->setAttr("transpose_lhs_hint",
+                mlir::BoolAttr::get(op->getContext(), false));
+  }
+  return success();
+}
+
+LogicalResult matmul_downgrade(Operation* op, int version, bool&) {
+  if (version < 13) {
+    auto transpose_lhs_hint_attr =
+        op->getAttrOfType<BoolAttr>("transpose_lhs_hint");
+    if (!transpose_lhs_hint_attr) {
+      return op->emitOpError("Missing transpose_lhs_hint attribute");
+    }
+    if (transpose_lhs_hint_attr.getValue()) {
+      return op->emitOpError(
+          "Can only downgrade below version 12 when transpose_lhs_hint is "
+          "False ");
+    }
+    op->removeAttr("transpose_lhs_hint");
+  }
+  return success();
+}
+
 const llvm::StringMap<SerdeRuleType>& upgrade_rules() {
   static auto rules = new llvm::StringMap<SerdeRuleType>{
       {EnqueueDMAOp::getOperationName(), enqueue_dma_upgrade},
@@ -330,6 +383,7 @@ const llvm::StringMap<SerdeRuleType>& upgrade_rules() {
        vector_multi_dim_reduce_upgrade},
       {StoreOp::getOperationName(), store_upgrade},
       {arith::ConstantOp::getOperationName(), arith_constant_upgrade},
+      {MatmulOp::getOperationName(), matmul_upgrade},
   };
   return *rules;
 }
@@ -345,6 +399,8 @@ const llvm::StringMap<SerdeRuleType>& downgrade_rules() {
       {vector::MultiDimReductionOp::getOperationName(),
        vector_multi_dim_reduce_downgrade},
       {arith::ConstantOp::getOperationName(), arith_constant_downgrade},
+      {ReinterpretCastOp::getOperationName(), reinterpret_cast_downgrade},
+      {MatmulOp::getOperationName(), matmul_downgrade},
   };
   return *rules;
 }

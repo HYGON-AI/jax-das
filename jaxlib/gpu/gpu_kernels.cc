@@ -21,11 +21,9 @@ limitations under the License.
 #include "jaxlib/gpu/rnn_kernels.h"
 #include "jaxlib/gpu/solver_kernels_ffi.h"
 #include "jaxlib/gpu/sparse_kernels.h"
-#include "jaxlib/gpu/triton_kernels.h"
 #include "jaxlib/gpu/vendor.h"
 #include "xla/ffi/api/c_api.h"
 #include "xla/ffi/api/ffi.h"
-#include "xla/service/custom_call_target_registry.h"
 
 namespace jax {
 namespace JAX_GPU_NAMESPACE {
@@ -86,9 +84,6 @@ XLA_FFI_REGISTER_HANDLER(XLA_FFI_GetApi(), "cusparse_coo_matmat_ffi", "CUDA",
                          CooMatmatFfi);
 XLA_FFI_REGISTER_HANDLER(XLA_FFI_GetApi(), "cusparse_gtsv2_ffi", "CUDA",
                          kGtsv2);
-
-XLA_REGISTER_CUSTOM_CALL_TARGET_WITH_SYM("triton_kernel_call", TritonKernelCall,
-                                         "CUDA");
 
 }  // namespace
 }  // namespace JAX_GPU_NAMESPACE
