@@ -12,11 +12,6 @@
 #                                   defaults to the pinned xla-das main snapshot below.
 #   HCU_DTK_VERSION                 optional, default 26.04. The tarball URL is derived from it.
 #   HCU_PIP_INDEX_URL               optional, default the TUNA PyPI mirror
-#
-# Repository secrets consumed below:
-#   XLA_DAS_READ_TOKEN              read-only token for the private HYGON-AI/xla-das
-#                                   repository. Required: the default GITHUB_TOKEN
-#                                   cannot read another private repository.
 
 name: CI HCU
 permissions:
@@ -109,7 +104,7 @@ jobs:
 
       # xla-das is only needed to build: XLA_DIR below makes the build use
       # --local_xla_path, so Bazel never downloads the tarball pinned in
-      # third_party/xla/revision.bzl, which is unreachable while the repository is private.
+      # third_party/xla/revision.bzl.
       - name: Validate pinned XLA commit
         run: |
           if [[ ! "${XLA_COMMIT}" =~ ^[0-9a-fA-F]{40}$ ]]; then
@@ -123,7 +118,6 @@ jobs:
         with:
           repository: ${{ vars.HCU_XLA_DAS_REPO || 'HYGON-AI/xla-das' }}
           ref: ${{ env.XLA_COMMIT }}
-          token: ${{ secrets.XLA_DAS_READ_TOKEN }}
           path: xla-das
           persist-credentials: false
 
