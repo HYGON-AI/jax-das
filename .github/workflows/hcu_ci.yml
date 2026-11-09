@@ -140,6 +140,10 @@ jobs:
             "${PIP_INDEX_URL}" "$(awk -F/ '{print $3}' <<<"${PIP_INDEX_URL}")" \
             | tee /etc/pip.conf
 
+      - name: Install Python build dependencies
+        run: |
+          "${PYTHON_BIN}" -m pip install "wheel>=0.40" auditwheel patchelf
+
       - name: Build JAX wheels
         timeout-minutes: 120
         working-directory: jax-das

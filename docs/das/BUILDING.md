@@ -176,10 +176,13 @@ printf '[global]\nindex-url = https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simp
 git clone -b main https://github.com/HYGON-AI/jax-das.git
 ```
 
-进入源码目录并开始编译：
+进入源码目录并安装编译依赖：
 
 ```bash
 cd ./jax-das/scripts/
+
+# 安装 Python 打包/修复工具
+python3 -m pip install "wheel>=0.40" auditwheel patchelf
 
 # 编译（耗时较长，建议在 tmux / screen 中执行）
 bash build_jax_dtk.sh
