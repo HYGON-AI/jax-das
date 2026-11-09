@@ -1,3 +1,7 @@
+// Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+// SPDX-License-Identifier: Apache-2.0
+// Modified by Hygon Information Technology Co., Ltd., 2026.
+
 /* Copyright 2021 The JAX Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
@@ -301,6 +305,17 @@ static absl::Status CsrMatmat_(gpuStream_t stream, void** buffers,
   JAX_RETURN_IF_ERROR(JAX_AS_STATUS(gpusparseCreateDnMat(
       &mat_c, d.C.rows, d.C.cols,
       /*ld=*/d.C.cols, Cbuf, d.C.type, GPUSPARSE_ORDER_ROW)));
+#ifdef JAX_GPU_HIP
+  // hipSPARSE may read C with beta=0 for transposed complex CSR products.
+  if (d.op_A == GPUSPARSE_OPERATION_TRANSPOSE &&
+      (d.C.type == GPU_C_32F || d.C.type == GPU_C_64F)) {
+    size_t bytes =
+        static_cast<size_t>(d.C.rows) * d.C.cols *
+        (d.C.type == GPU_C_32F ? 2 * sizeof(float) : 2 * sizeof(double));
+    JAX_RETURN_IF_ERROR(JAX_AS_STATUS(gpuMemsetD8Async(
+        reinterpret_cast<gpuDevicePtr_t>(Cbuf), 0, bytes, stream)));
+  }
+#endif
   JAX_RETURN_IF_ERROR(JAX_AS_STATUS(gpusparseSpMM(
       handle.get(), d.op_A, /*opB=*/GPUSPARSE_OPERATION_NON_TRANSPOSE, &alpha,
       mat_a, mat_b, &beta, mat_c, d.C.type, GPUSPARSE_SPMM_CSR_ALG, buf)));
