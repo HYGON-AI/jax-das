@@ -150,7 +150,24 @@ jobs:
         env:
           XLA_DIR: ${{ github.workspace }}/xla-das
           PYTHON_BIN: ${{ env.PYTHON_BIN }}
-        run: bash scripts/build_jax_dtk.sh
+        run: |
+          bash scripts/build_jax_dtk.sh
+
+          shopt -s nullglob
+          ws=(dist/*.whl dist/linux/*.whl)
+          shopt -u nullglob
+
+          declare -A top
+          for w in "${ws[@]}"; do
+            b=${w##*/}; p=${b%%-*}; v=$(cut -d- -f2 <<<"$b")
+            [[ -z "${top[$p]:-}" || "$v" == "$(printf '%s\n%s\n' "${top[$p]}" "$v" | sort -V | tail -1)" ]] && top[$p]=$v
+          done
+          for w in "${ws[@]}"; do
+            b=${w##*/}; p=${b%%-*}; v=$(cut -d- -f2 <<<"$b")
+            [[ "$v" != "${top[$p]}" ]] && rm -f "$w"
+          done
+
+          ls -l dist/
 
       - name: Install JAX wheels and test dependencies
         working-directory: jax-das
