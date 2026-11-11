@@ -59,7 +59,7 @@ jobs:
     name: Build JAX wheels
     runs-on: hygon-build
     needs: [manual_approval]
-    if: ${{ always() && (needs.manual_approval.result == 'success' || needs.manual_approval.result == 'skipped') }}
+    if: ${{ !cancelled() && (needs.manual_approval.result == 'success' || needs.manual_approval.result == 'skipped') }}
     timeout-minutes: 120
     container:
       image: ${{ vars.BASE_COMPILE_IMAGE_ROCKY_PY311 }}
@@ -143,6 +143,15 @@ jobs:
           cp jax-das/dist/*.whl "${d}/"
           ls -l "${d}/"
 
+      - name: Upload JAX wheels
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: jax-hcu-wheels-${{ github.run_id }}
+          path: jax-das/dist/
+          retention-days: 7
+
   # Decides the test pool, GPU set and test scope from the target branch, so
   # the single `test` job below can use a dynamic runs-on instead of two
   # near-duplicate fast/full jobs. runs-on supports `needs.*.outputs` here.
@@ -177,8 +186,13 @@ jobs:
 
   test:
     name: Test JAX on HCU
-    needs: [build, plan]
+    needs: [build, plan, manual_approval]
     runs-on: ${{ needs.plan.outputs.pool }}
+    if: >-
+      !cancelled() &&
+      needs.build.result == 'success' &&
+      needs.plan.result == 'success' &&
+      (needs.manual_approval.result == 'success' || needs.manual_approval.result == 'skipped')
     timeout-minutes: 600
     container:
       image: ${{ vars.BASE_COMPILE_IMAGE_ROCKY_PY311 }}
