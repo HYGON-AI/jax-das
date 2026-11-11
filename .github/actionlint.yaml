@@ -1,4 +1,7 @@
 # Configuration related to self-hosted runner.
 self-hosted-runner:
   labels:
-    - "bw1100" # Linux X86 Hygon HCU runner used by the HCU CI workflow.
+    - "hygon-build"  # Self-hosted runner for building JAX wheels.
+    - "hygon-cpu"    # Self-hosted runner for test planning.
+    - "hygon-bw1100-4card"  # Self-hosted runner for BW1100 4-card tests.
+    - "hygon-bw1100-8card"  # Self-hosted runner for BW1100 8-card tests.
