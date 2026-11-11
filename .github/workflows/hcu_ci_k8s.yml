@@ -2,14 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Organization variables consumed below:
-#   BASE_COMPILE_IMAGE_ROCKY_PY311  base compile image, "<registry>/<repo>:<tag>"
+#   HCU_IMAGE_REGISTRY              base compile image, "${{ vars.HCU_IMAGE_REGISTRY }}/<project>/<image>:<tag>"
 #   RESOURCE_SERVER_URL             server resources url
 #
 # Repository variables consumed below (all optional):
-#   HCU_PYTHON_BIN                  optional, default python3.11.
-#   HCU_XLA_DAS_REPO                optional, default HYGON-AI/xla-das
-#   HCU_XLA_DAS_REF                 optional, full 40-character commit SHA only;
-#                                   defaults to the pinned xla-das main snapshot below.
+#   HCU_PYTHON_BIN                  optional, default python3.12.
 #   HCU_DTK_VERSION                 optional, default 26.04. The tarball URL is derived from it.
 #   HCU_PIP_INDEX_URL               optional, default the TUNA PyPI mirror
 
@@ -62,12 +59,11 @@ jobs:
     if: ${{ !cancelled() && (needs.manual_approval.result == 'success' || needs.manual_approval.result == 'skipped') }}
     timeout-minutes: 120
     container:
-      image: ${{ vars.BASE_COMPILE_IMAGE_ROCKY_PY311 }}
+      image: ${{ vars.HCU_IMAGE_REGISTRY }}/hcu/base/dtk:26.04-rockylinux8.6-py3.12
     env:
       DTK_VERSION: ${{ vars.HCU_DTK_VERSION || '26.04' }}
       RESOURCE_SERVER_URL: ${{ vars.RESOURCE_SERVER_URL }}
-      PYTHON_BIN: ${{ vars.HCU_PYTHON_BIN || 'python3.11' }}
-      XLA_COMMIT: ${{ vars.HCU_XLA_DAS_REF || '8e709b7753a3a135e80c7b1b2fdba601a06dd168' }}
+      PYTHON_BIN: ${{ vars.HCU_PYTHON_BIN || 'python3.12' }}
       RUN_NAME: ci-${{ github.run_id }}
     steps:
       - name: Checking out jax-das
@@ -77,26 +73,21 @@ jobs:
           path: jax-das
           persist-credentials: false
 
-      - name: Validate pinned XLA commit
+      - name: Install HCU LLVM
         working-directory: jax-das
         run: |
-          if [[ ! "${XLA_COMMIT}" =~ ^[0-9a-fA-F]{40}$ ]]; then
-            echo "::error::HCU_XLA_DAS_REF must be a full 40-character commit SHA."
+          wget --timeout=30 --tries=3 -q \
+            "${RESOURCE_SERVER_URL%/}/ai_cc/Nightly/hcu_llvm_installer.sh" \
+            -O /tmp/hcu_llvm_installer.sh
+          chmod +x /tmp/hcu_llvm_installer.sh
+          bash /tmp/hcu_llvm_installer.sh --major 1.0.0
+          rm -f /tmp/hcu_llvm_installer.sh
+
+          if [[ ! -x "/opt/dtk/aillvm/bin/clang" ]]; then
+            echo "ERROR: /opt/dtk/aillvm/bin/clang missing after HCU LLVM install." >&2
             exit 1
           fi
-          echo "Pinned XLA commit: ${XLA_COMMIT}"
-
-      - name: Checking out xla-das
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          repository: ${{ vars.HCU_XLA_DAS_REPO || 'HYGON-AI/xla-das' }}
-          ref: ${{ env.XLA_COMMIT }}
-          path: xla-das
-          persist-credentials: false
-
-      - name: Install DTK, HCU LLVM, bazelisk and node
-        working-directory: jax-das
-        run: bash ci/setup_hcu_ci_env.sh
+          echo "HCU LLVM 1.0.0 installed successfully."
 
       - name: Configure pip index
         env:
@@ -113,7 +104,6 @@ jobs:
       - name: Build JAX wheels
         working-directory: jax-das
         env:
-          XLA_DIR: ${{ github.workspace }}/xla-das
           PYTHON_BIN: ${{ env.PYTHON_BIN }}
         run: |
           bash scripts/build_jax_dtk.sh
@@ -195,11 +185,11 @@ jobs:
       (needs.manual_approval.result == 'success' || needs.manual_approval.result == 'skipped')
     timeout-minutes: 600
     container:
-      image: ${{ vars.BASE_COMPILE_IMAGE_ROCKY_PY311 }}
+      image: ${{ vars.HCU_IMAGE_REGISTRY }}/hcu/base/dtk:26.04-rockylinux8.6-py3.12
     env:
       DTK_VERSION: ${{ vars.HCU_DTK_VERSION || '26.04' }}
       RESOURCE_SERVER_URL: ${{ vars.RESOURCE_SERVER_URL }}
-      PYTHON_BIN: ${{ vars.HCU_PYTHON_BIN || 'python3.11' }}
+      PYTHON_BIN: ${{ vars.HCU_PYTHON_BIN || 'python3.12' }}
       RUN_NAME: ci-${{ github.run_id }}
       GPU_IDS: ${{ needs.plan.outputs.gpu_ids }}
     steps:
@@ -210,9 +200,21 @@ jobs:
           path: jax-das
           persist-credentials: false
 
-      - name: Install DTK, HCU LLVM, bazelisk and node
+      - name: Install HCU LLVM
         working-directory: jax-das
-        run: bash ci/setup_hcu_ci_env.sh
+        run: |
+          wget --timeout=30 --tries=3 -q \
+            "${RESOURCE_SERVER_URL%/}/ai_cc/Nightly/hcu_llvm_installer.sh" \
+            -O /tmp/hcu_llvm_installer.sh
+          chmod +x /tmp/hcu_llvm_installer.sh
+          bash /tmp/hcu_llvm_installer.sh --major 1.0.0
+          rm -f /tmp/hcu_llvm_installer.sh
+
+          if [[ ! -x "/opt/dtk/aillvm/bin/clang" ]]; then
+            echo "ERROR: /opt/dtk/aillvm/bin/clang missing after HCU LLVM install." >&2
+            exit 1
+          fi
+          echo "HCU LLVM 1.0.0 installed successfully."
 
       - name: Device info
         run: |
