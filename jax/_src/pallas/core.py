@@ -158,7 +158,16 @@ enable_debug_checks = _ENABLE_DEBUG_CHECKS
 
 def debug_checks_enabled() -> bool:
   """Returns runtime checks are enabled."""
-  return _ENABLE_DEBUG_CHECKS.value
+  return config.jax_pallas_enable_debug_checks.value
+
+
+enable_poison_buffers = config.jax_pallas_poison_buffers
+
+
+def poison_buffers_enabled() -> bool:
+  """Returns whether Pallas buffer poisoning is enabled."""
+  return config.jax_pallas_poison_buffers.value
+
 
 
 def debug_check(condition, message):
