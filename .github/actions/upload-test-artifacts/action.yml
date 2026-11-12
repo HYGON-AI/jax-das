@@ -5,28 +5,28 @@ description: Upload test artifacts (JUnit XML) to GitHub Actions.
 inputs:
   test-artifacts-dir:
     description: "Directory containing test artifact files"
-    default: 'test-artifacts'
+    default: "test-artifacts"
   artifact-name:
     description: "Name for the GitHub Actions artifact upload"
-    default: 'test-artifacts-${{ github.job }}'
+    default: "test-artifacts-${{ github.job }}"
   gcs-upload-uri:
     description: "GCS location prefix where the test artifacts should be uploaded"
-    default: 'gs://general-ml-ci-transient/jax-github-actions/jax/${{ github.workflow }}/${{ github.run_number }}/${{ github.run_attempt }}'
+    default: "gs://general-ml-ci-transient/jax-github-actions/jax/${{ github.workflow }}/${{ github.run_number }}/${{ github.run_attempt }}"
   metadata:
     description: "JSON string containing job-level metadata"
-    default: ''
+    default: ""
   inputs_json:
     description: "JSON string of workflow inputs"
-    default: '{}'
+    default: "{}"
   matrix_json:
     description: "JSON string of matrix parameters"
-    default: '{}'
+    default: "{}"
   env_json:
     description: "JSON string of environment variables"
-    default: '{}'
+    default: "{}"
   custom_json:
     description: "JSON string of custom metadata"
-    default: '{}'
+    default: "{}"
 
 runs:
   using: "composite"
@@ -37,10 +37,11 @@ runs:
       shell: bash
       env:
         TEST_ARTIFACTS_DIR: ${{ inputs.test-artifacts-dir }}
+        RUN_ATTEMPT: ${{ github.run_attempt }}
       run: |
-        printf -v padded_attempt "attempt%03d" "${{ github.run_attempt }}"
+        printf -v padded_attempt "attempt%03d" "$RUN_ATTEMPT"
         echo "padded_attempt=${padded_attempt}" >> "$GITHUB_OUTPUT"
-        if [[ -d "$TEST_ARTIFACTS_DIR" ]] && [[ -n "$(ls -A "$TEST_ARTIFACTS_DIR"/*.xml 2>/dev/null)" ]]; then
+        if [[ -d "$TEST_ARTIFACTS_DIR" ]] && [[ -n "$(ls -A "$TEST_ARTIFACTS_DIR" 2>/dev/null)" ]]; then
           echo "has_artifacts=true" >> "$GITHUB_OUTPUT"
           echo "Found test artifacts in $TEST_ARTIFACTS_DIR/"
           ls -la "$TEST_ARTIFACTS_DIR"/*.xml
@@ -58,6 +59,7 @@ runs:
         CUSTOM_JSON: ${{ inputs.custom_json }}
         EXPLICIT_METADATA: ${{ inputs.metadata }}
         TEST_ARTIFACTS_DIR: ${{ inputs.test-artifacts-dir }}
+        GITHUB_JOB_ID: ${{ job.check_run_id }}
       run: |
         mkdir -p "$TEST_ARTIFACTS_DIR"
         python3 -c "
@@ -69,6 +71,10 @@ runs:
         explicit_str = os.environ.get('EXPLICIT_METADATA', '')
 
         merged = {**inputs, **matrix, **env_vars, **custom}
+
+        job_id = os.environ.get('GITHUB_JOB_ID')
+        if job_id:
+            merged['job_id'] = int(job_id)
 
         if explicit_str:
             try:
@@ -90,7 +96,18 @@ runs:
         TEST_ARTIFACTS_DIR: ${{ inputs.test-artifacts-dir }}
         GCS_UPLOAD_URI: ${{ inputs.gcs-upload-uri }}
         INPUT_ARTIFACT_NAME: ${{ inputs.artifact-name }}
+        PADDED_ATTEMPT: ${{ steps.check-artifacts.outputs.padded_attempt }}
+        GITHUB_WORKFLOW: ${{ github.workflow }}
       run: |
-        artifact_name="$INPUT_ARTIFACT_NAME-${{ steps.check-artifacts.outputs.padded_attempt }}"
-        gcloud storage cp -r "$TEST_ARTIFACTS_DIR"/* "$GCS_UPLOAD_URI/$artifact_name/"
+        artifact_name="$INPUT_ARTIFACT_NAME-$PADDED_ATTEMPT"
+        WF_NAME="$GITHUB_WORKFLOW"
+        SAFE_WF_NAME="${WF_NAME//\//-}"
+        REAL_URI="${GCS_UPLOAD_URI//$WF_NAME/$SAFE_WF_NAME}"
 
+        # Zip the artifacts locally first
+        cd "$TEST_ARTIFACTS_DIR"
+        zip -r "$GITHUB_WORKSPACE/test-artifacts.zip" .
+        cd -
+
+        # Upload the single zip file instead of many small files
+        gcloud storage cp "$GITHUB_WORKSPACE/test-artifacts.zip" "$REAL_URI/$artifact_name/test-artifacts.zip"

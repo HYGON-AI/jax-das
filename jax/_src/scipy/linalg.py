@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 from functools import partial
+import math
 import textwrap
 from typing import overload, Any, Literal
 import warnings
@@ -34,7 +35,7 @@ from jax._src.numpy.util import (
     check_arraylike, promote_dtypes, promote_dtypes_inexact,
     promote_dtypes_complex, promote_args_inexact)
 from jax._src.tpu.linalg import qdwh
-from jax._src.typing import Array, ArrayLike
+from jax._src.typing import Array, ArrayLike, DTypeLike
 
 
 _no_chkfinite_doc = textwrap.dedent("""
@@ -2568,6 +2569,166 @@ def _hankel(c: Array, r: Array) -> Array:
       precision=lax.Precision.HIGHEST)[0]
 
 
+def circulant(c: ArrayLike) -> Array:
+  r"""Construct a circulant matrix.
+
+  JAX implementation of :func:`scipy.linalg.circulant`.
+
+  A circulant matrix has cyclically shifted columns: :math:`A_{ij} = c_{(i - j) \bmod n}`
+  for :math:`0 \le i, j < n`, where ``c`` specifies the first column.
+
+  Args:
+    c: array of shape ``(..., N)`` specifying the first column.
+
+  Returns:
+    A circulant matrix of shape ``(..., N, N)``.
+
+  Examples:
+    >>> c = jnp.array([1, 2, 3])
+    >>> jax.scipy.linalg.circulant(c)
+    Array([[1, 3, 2],
+           [2, 1, 3],
+           [3, 2, 1]], dtype=int32)
+
+    For N-dimensional ``c``, the result is a batch of circulant matrices:
+
+    >>> c = jnp.array([[1, 2, 3], [4, 5, 6]])
+    >>> jax.scipy.linalg.circulant(c)
+    Array([[[1, 3, 2],
+            [2, 1, 3],
+            [3, 2, 1]],
+    <BLANKLINE>
+           [[4, 6, 5],
+            [5, 4, 6],
+            [6, 5, 4]]], dtype=int32)
+  """
+  check_arraylike("circulant", c)
+  return _circulant(jnp.atleast_1d(jnp.asarray(c)))
+
+@partial(jnp_vectorize.vectorize, signature="(n)->(n,n)")
+def _circulant(c: Array) -> Array:
+  n, = c.shape
+  idx = (jnp.arange(n)[:, None] - jnp.arange(n)[None, :]) % n
+  return c[idx]
+
+
+def leslie(f: ArrayLike, s: ArrayLike) -> Array:
+  r"""Construct a Leslie matrix.
+
+  JAX implementation of :func:`scipy.linalg.leslie`.
+
+  Given fecundity coefficients ``f`` of shape ``(..., N)`` and survival
+  coefficients ``s`` of shape ``(..., N - 1)``, the Leslie matrix has ``f`` as
+  its first row, ``s`` along its first sub-diagonal, and zeros elsewhere.
+
+  Args:
+    f: array of shape ``(..., N)`` with ``N >= 2`` containing the fecundity
+      coefficients.
+    s: array of shape ``(..., N - 1)`` containing the survival coefficients.
+
+  Returns:
+    A Leslie matrix of shape ``(..., N, N)``.
+
+  Examples:
+    >>> jax.scipy.linalg.leslie(jnp.array([0.1, 2.0, 1.0, 0.1]),
+    ...                         jnp.array([0.2, 0.8, 0.7]))
+    Array([[0.1, 2. , 1. , 0.1],
+           [0.2, 0. , 0. , 0. ],
+           [0. , 0.8, 0. , 0. ],
+           [0. , 0. , 0.7, 0. ]], dtype=float32)
+  """
+  check_arraylike("leslie", f, s)
+  f_arr = jnp.atleast_1d(f)
+  s_arr = jnp.atleast_1d(s)
+  if f_arr.shape[-1] < 2:
+    raise ValueError(
+        "The length of f along the last axis must be at least 2; "
+        f"got shape {f_arr.shape}.")
+  if s_arr.shape[-1] != f_arr.shape[-1] - 1:
+    raise ValueError(
+        "Incorrect lengths for f and s. The length of s along the last axis "
+        f"must be one less than the length of f; got f shape {f_arr.shape} "
+        f"and s shape {s_arr.shape}.")
+  return _leslie(f_arr, s_arr)
+
+@partial(jnp_vectorize.vectorize, signature="(n),(m)->(n,n)")
+def _leslie(f: Array, s: Array) -> Array:
+  f, s = promote_dtypes(f, s)
+  return jnp.diag(s, k=-1).at[0].set(f)
+
+
+def companion(a: ArrayLike) -> Array:
+  r"""Construct a companion matrix.
+
+  JAX implementation of :func:`scipy.linalg.companion`.
+
+  Given polynomial coefficients :math:`a = [a_0, a_1, \ldots, a_{n-1}]` with
+  :math:`a_0 \neq 0`, the companion matrix is the :math:`(n-1) \times (n-1)`
+  matrix whose first row is :math:`-[a_1, a_2, \ldots, a_{n-1}] / a_0` and
+  whose first sub-diagonal is filled with ones.
+
+  Args:
+    a: array of shape ``(..., N)`` with ``N >= 2`` specifying the polynomial
+      coefficients.
+
+  Returns:
+    A companion matrix of shape ``(..., N - 1, N - 1)``.
+
+  Note:
+    Unlike :func:`scipy.linalg.companion`, this function does not check at
+    runtime that ``a[..., 0]`` is non-zero; if the leading coefficient is
+    zero, the result will contain ``inf`` or ``nan`` entries.
+
+  Examples:
+    >>> jax.scipy.linalg.companion(jnp.array([1., -10., 31., -30.]))
+    Array([[ 10., -31.,  30.],
+           [  1.,   0.,   0.],
+           [  0.,   1.,   0.]], dtype=float32)
+  """
+  a, = promote_args_inexact("companion", a)
+  a = jnp.atleast_1d(a)
+  if a.shape[-1] < 2:
+    raise ValueError(
+        "The length of `a` along the last axis must be at least 2; "
+        f"got shape {a.shape}.")
+  return _companion(a)
+
+@partial(jnp_vectorize.vectorize, signature="(n)->(m,m)")
+def _companion(a: Array) -> Array:
+  first_row = -a[1:] / a[0]
+  m = a.shape[0] - 1
+  out = jnp.eye(m, m, k=-1, dtype=first_row.dtype)
+  return out.at[0].set(first_row)
+
+
+def fiedler(a: ArrayLike) -> Array:
+  r"""Construct a symmetric Fiedler matrix.
+
+  JAX implementation of :func:`scipy.linalg.fiedler`.
+
+  The Fiedler matrix has entries :math:`F_{ij} = |a_i - a_j|` for
+  :math:`0 \le i, j < n`, where ``a`` is the input vector. The result is
+  symmetric with a zero diagonal.
+
+  Args:
+    a: array of shape ``(..., N)``.
+
+  Returns:
+    A Fiedler matrix of shape ``(..., N, N)``.
+
+  Examples:
+    >>> jax.scipy.linalg.fiedler(jnp.array([1, 4, 12, 45, 77]))
+    Array([[ 0,  3, 11, 44, 76],
+           [ 3,  0,  8, 41, 73],
+           [11,  8,  0, 33, 65],
+           [44, 41, 33,  0, 32],
+           [76, 73, 65, 32,  0]], dtype=int32)
+  """
+  check_arraylike("fiedler", a)
+  arr = jnp.atleast_1d(a)
+  return jnp.abs(arr[..., None] - arr[..., None, :])
+
+
 @jit(static_argnames=("n",))
 def hilbert(n: int) -> Array:
   r"""Create a Hilbert matrix of order n.
@@ -2660,6 +2821,129 @@ def _binom(n, k):
   b = lax.lgamma(n - k + 1.0)
   c = lax.lgamma(k + 1.0)
   return lax.exp(a - b - c)
+
+
+@jit(static_argnames=("n", "full"))
+def helmert(n: int, full: bool = False) -> Array:
+  r"""Construct a Helmert matrix.
+
+  JAX implementation of :func:`scipy.linalg.helmert`.
+
+  The Helmert matrix has rows of orthonormal contrasts. For ``k = 1, ...,
+  n - 1``, row ``k - 1`` is :math:`(\underbrace{1, \ldots, 1}_{k}, -k, 0,
+  \ldots, 0) / \sqrt{k(k + 1)}`. If ``full`` is ``True``, a row of
+  :math:`1 / \sqrt{n}` is prepended.
+
+  Args:
+    n: size of the matrix. Must be a positive integer.
+    full: if ``True``, return the full ``(n, n)`` matrix; otherwise return
+      only the ``(n - 1, n)`` contrast block. Defaults to ``False``.
+
+  Returns:
+    A Helmert matrix of shape ``(n - 1, n)`` if ``full`` is ``False``, or
+    ``(n, n)`` if ``full`` is ``True``.
+
+  Examples:
+    >>> jax.scipy.linalg.helmert(2, full=True).round(3)
+    Array([[ 0.707,  0.707],
+           [ 0.707, -0.707]], dtype=float32)
+  """
+  if n < 1:
+    raise ValueError(f"n must be a positive integer; got {n}.")
+  i = jnp.arange(n - 1)[:, None]
+  j = jnp.arange(n)[None, :]
+  k = i + 1
+  k_f = k.astype(dtypes.default_float_dtype())
+  denom = jnp.sqrt(k_f * (k_f + 1))
+  H = jnp.where(j <= i, 1.0 / denom,
+                jnp.where(j == k, -k_f / denom, jnp.zeros_like(denom)))
+  if full:
+    first_row = jnp.full((1, n), 1.0 / jnp.sqrt(n), dtype=H.dtype)
+    H = jnp.concatenate([first_row, H], axis=0)
+  return H
+
+
+@jit(static_argnames=("n", "dtype"))
+def hadamard(n: int, dtype: DTypeLike = int) -> Array:
+  r"""Construct an n-by-n Hadamard matrix.
+
+  JAX implementation of :func:`scipy.linalg.hadamard`.
+
+  For ``n`` a positive power of 2, the Hadamard matrix :math:`H_n` satisfies
+  :math:`H_n H_n^T = n I`. It is defined recursively by the Sylvester
+  construction: :math:`H_1 = [[1]]`, and
+  :math:`H_{2m} = \begin{bmatrix} H_m & H_m \\ H_m & -H_m \end{bmatrix}`.
+
+  Args:
+    n: size of the matrix. Must be a positive power of 2.
+    dtype: output dtype. Defaults to ``int``.
+
+  Returns:
+    A Hadamard matrix of shape ``(n, n)``.
+
+  Examples:
+    >>> jax.scipy.linalg.hadamard(4)
+    Array([[ 1,  1,  1,  1],
+           [ 1, -1,  1, -1],
+           [ 1,  1, -1, -1],
+           [ 1, -1, -1,  1]], dtype=int32)
+  """
+  if n < 1 or not math.log2(n).is_integer():
+    raise ValueError(
+        f"n must be a positive power of 2; got {n}.")
+  lg2 = int(math.log2(n))
+  H = jnp.ones((1, 1), dtype=dtype)
+  for _ in range(lg2):
+    H = jnp.block([[H, H], [H, -H]])
+  return H
+
+
+@jit(static_argnames=("n", "scale", "dtype"))
+def dft(n: int, scale: str | None = None, *,
+        dtype: DTypeLike | None = None) -> Array:
+  r"""Construct an n-by-n discrete Fourier transform matrix.
+
+  JAX implementation of :func:`scipy.linalg.dft`.
+
+  The DFT matrix :math:`W_n` has entries :math:`W_{ij} = \omega^{ij}`, where
+  :math:`\omega = e^{-2\pi i / n}` is the primitive n-th root of unity, for
+  :math:`0 \le i, j < n`.
+
+  Args:
+    n: size of the matrix.
+    scale: (optional) ``None`` (default, unscaled), ``'sqrtn'`` (scale by
+      :math:`1/\sqrt{n}`, making the matrix unitary), or ``'n'`` (scale by
+      :math:`1/n`).
+    dtype: (optional) complex floating-point dtype for the output. Defaults to
+      JAX's default complex dtype.
+
+  Returns:
+    A DFT matrix of shape ``(n, n)``.
+
+  Examples:
+    >>> jax.scipy.linalg.dft(4).round(3)
+    Array([[ 1.+0.j,  1.+0.j,  1.+0.j,  1.+0.j],
+           [ 1.+0.j, -0.-1.j, -1.+0.j,  0.+1.j],
+           [ 1.+0.j, -1.+0.j,  1.-0.j, -1.+0.j],
+           [ 1.+0.j,  0.+1.j, -1.+0.j, -0.-1.j]], dtype=complex64)
+  """
+  if scale is not None and scale not in ('sqrtn', 'n'):
+    raise ValueError(
+        f"scale must be None, 'sqrtn', or 'n'; got {scale!r}.")
+  if dtype is None:
+    dtype = dtypes.default_complex_dtype()
+  else:
+    dtype = dtypes.check_and_canonicalize_user_dtype(dtype, "dft")
+    if not dtypes.issubdtype(dtype, np.complexfloating):
+      raise ValueError(
+          f"dtype must be a complex floating-point type; got {dtype}.")
+  a = jnp.arange(n, dtype=dtype)
+  omegas = jnp.exp(-2j * np.pi * a[:, None] * a[None, :] / n)
+  if scale == 'sqrtn':
+    omegas = omegas / jnp.sqrt(n)
+  elif scale == 'n':
+    omegas = omegas / n
+  return omegas
 
 
 def _solve_sylvester_triangular_scan(R: Array, S: Array, F: Array) -> Array:

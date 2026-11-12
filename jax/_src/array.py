@@ -36,7 +36,7 @@ from jax._src import xla_bridge
 from jax._src.op_shardings import are_hlo_shardings_equal
 from jax._src.interpreters import mlir
 from jax._src.interpreters import pxla
-from jax._src.layout import AutoLayout, Format, Layout
+from jax._src.layout import AutoLayoutSingleton, Format, Layout
 from jax._src.lib import _jax
 from jax._src.lib import xla_client as xc
 from jax._src.mesh import (empty_concrete_mesh, empty_abstract_mesh,
@@ -336,7 +336,7 @@ class ArrayImpl(basearray.Array):
       return repr(self)
 
   def __getitem__(self, idx, /):
-    from jax._src.numpy import indexing  # pytype: disable=import-error
+    from jax._src.numpy import indexing  # pyrefly: ignore[missing-import]
     self._check_if_deleted()
 
     return indexing.rewriting_take(self, idx)
@@ -417,7 +417,7 @@ class ArrayImpl(basearray.Array):
                  max_version: tuple[int, int] | None = None,
                  dl_device: tuple[DLDeviceType, int] | None = None,
                  copy: bool | None = None):
-    from jax._src.dlpack import to_dlpack  # pytype: disable=import-error
+    from jax._src.dlpack import to_dlpack  # pyrefly: ignore[missing-import]
 
     device_set = self.sharding.device_set
     if len(device_set) > 1:
@@ -437,7 +437,7 @@ class ArrayImpl(basearray.Array):
     if len(self._arrays) != 1:
       raise BufferError("__dlpack__ only supported for unsharded arrays.")
 
-    from jax._src.dlpack import DLDeviceType  # pytype: disable=import-error
+    from jax._src.dlpack import DLDeviceType  # pyrefly: ignore[missing-import]
 
     if self.platform() == "cpu":  # pyrefly: ignore[missing-attribute]
       return DLDeviceType.kDLCPU, 0
@@ -724,7 +724,7 @@ def make_array_from_callback(
   """
   # pyformat: enable
   dll = sharding.layout if isinstance(sharding, Format) else None
-  if isinstance(dll, AutoLayout):
+  if isinstance(dll, AutoLayoutSingleton):
     raise TypeError(
         "`Layout.AUTO` cannot be used in place of a device-local"
         f" layout when calling `jax.make_array_from_callback`. Got {sharding}")

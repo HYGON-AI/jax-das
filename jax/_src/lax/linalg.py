@@ -47,7 +47,7 @@ from jax._src.lib import cuda_versions
 from jax._src.lib import gpu_linalg
 from jax._src.lib import gpu_solver
 from jax._src.lib import gpu_sparse
-from jax._src.lib import jaxlib_extension_version, version as jaxlib_version
+from jax._src.lib import version as jaxlib_version
 from jax._src.lib import lapack
 from jax._src.lib.mlir import ir
 from jax._src.lib.mlir.dialects import chlo
@@ -125,7 +125,7 @@ def cholesky_update(r_matrix: ArrayLike, w_vector: ArrayLike) -> Array:
     A new upper-triangular matrix :math:`R` defining the Cholesky decomposition
     of :math:`A + w \, w^T`.
   """
-  r_matrix, w_vector = core.standard_insert_pvary(r_matrix, w_vector)
+  r_matrix, w_vector = core.auto_insert_reshard(r_matrix, w_vector)
   return cholesky_update_p.bind(r_matrix, w_vector)
 
 
@@ -141,6 +141,7 @@ def eig(
     *,
     compute_left_eigenvectors: bool = True,
     compute_right_eigenvectors: bool = True,
+    enable_eigvec_derivs: bool = False,
     implementation: EigImplementation | None = None,
     use_magma: bool | None = None,
 ) -> list[Array]:
@@ -171,15 +172,19 @@ def eig(
   be used if the library can be found, and the input matrix is sufficiently
   large (>= 2048x2048).
 
-  Currently autodiff is not supporteed for non-symmetric eigenvectors, and
-  is only supported to first-order for non-symmetric eigenvalues. See
-  https://github.com/jax-ml/jax/issues/2748.
-
   Args:
     x: A batch of square matrices with shape ``[..., n, n]``.
     compute_left_eigenvectors: If true, the left eigenvectors will be computed.
     compute_right_eigenvectors: If true, the right eigenvectors will be
       computed.
+    enable_eigvec_derivs: If true, enable autodiff of the returned
+      eigenvectors. The eigenvector derivative is taken under the LAPACK
+      ``geev`` normalisation (each eigenvector has unit 2-norm and its
+      largest-magnitude component is real). It is only valid when (i) all
+      eigenvalues are distinct and (ii) no eigenvector has two components
+      tied for largest magnitude. Defaults to ``False`` because these
+      conditions cannot be checked statically; see
+      https://github.com/jax-ml/jax/issues/2748 for discussion.
     use_magma: Deprecated, please use ``implementation`` instead. Locally
       override the ``jax_use_magma`` flag. If ``True``, the eigendecomposition
       is computed using MAGMA. If ``False``, the computation is done using
@@ -219,6 +224,7 @@ def eig(
     )
   return eig_p.bind(x, compute_left_eigenvectors=compute_left_eigenvectors,
                     compute_right_eigenvectors=compute_right_eigenvectors,
+                    enable_eigvec_derivs=enable_eigvec_derivs,
                     implementation=implementation)
 
 
@@ -319,7 +325,7 @@ def householder_product(a: ArrayLike, taus: ArrayLike) -> Array:
     A batch of orthogonal (unitary) matrices with the same shape as ``a``,
     containing the products of the elementary Householder reflectors.
   """
-  a, taus = core.standard_insert_pvary(a, taus)
+  a, taus = core.auto_insert_reshard(a, taus)
   return householder_product_p.bind(a, taus)
 
 
@@ -598,7 +604,7 @@ def symmetric_product(
     ``symmetrize_output`` is ``True``, the upper triangle is filled with the
     transpose of the lower triangle, and the whole matrix is valid.
   """
-  a_matrix, c_matrix = core.standard_insert_pvary(a_matrix, c_matrix)
+  a_matrix, c_matrix = core.auto_insert_reshard(a_matrix, c_matrix)
   result = symmetric_product_p.bind(a_matrix, c_matrix, alpha=alpha, beta=beta)
   if symmetrize_output:
     upper_half = lax.transpose(
@@ -656,7 +662,7 @@ def triangular_solve(
   singleton = np.ndim(b) == np.ndim(a) - 1
   if singleton:
     b = lax.expand_dims(b, (-1 if left_side else -2,))
-  a, b = core.standard_insert_pvary(a, b)
+  a, b = core.auto_insert_reshard(a, b)
   out = triangular_solve_p.bind(
       a, b, left_side=left_side, lower=lower, transpose_a=transpose_a,
       conjugate_a=conjugate_a, unit_diagonal=unit_diagonal)
@@ -728,7 +734,7 @@ def tridiagonal_solve(dl: Array, d: Array, du: Array, b: Array, *,
   """
   if perturb_singular and jaxlib_version < (0, 10):
     raise RuntimeError("perturb_singular=True requires jaxlib >= 0.10.0.")
-  dl, d, du, b = core.standard_insert_pvary(dl, d, du, b)
+  dl, d, du, b = core.auto_insert_reshard(dl, d, du, b)
   return tridiagonal_solve_p.bind(
     dl, d, du, b, perturb_singular=perturb_singular)
 
@@ -1011,7 +1017,9 @@ def _eig_compute_attr(compute):
   )
 
 def _eig_cpu_lowering(ctx, operand, *, compute_left_eigenvectors,
-                      compute_right_eigenvectors, implementation):
+                      compute_right_eigenvectors, enable_eigvec_derivs,
+                      implementation):
+  del enable_eigvec_derivs
   if implementation and implementation != EigImplementation.LAPACK:
     raise ValueError("Only the lapack implementation is supported on CPU.")
   operand_aval, = ctx.avals_in
@@ -1078,7 +1086,8 @@ def _unpack_conjugate_pairs(w: Array, vr: Array) -> Array:
 
 def _eig_gpu_lowering(ctx, operand, *,
                       compute_left_eigenvectors, compute_right_eigenvectors,
-                      implementation, target_name_prefix):
+                      enable_eigvec_derivs, implementation, target_name_prefix):
+  del enable_eigvec_derivs
   operand_aval, = ctx.avals_in
   batch_dims = operand_aval.shape[:-2]
   n, m = operand_aval.shape[-2:]
@@ -1190,19 +1199,64 @@ def _eig_gpu_lowering(ctx, operand, *,
     output.append(vr)
   return output
 
+def _eig_vec_jvp(dot, w, v, da):
+  # Nondegenerate perturbation theory, see e.g. Sec 3.1 of
+  # https://people.maths.ox.ac.uk/gilesm/files/NA-08-01.pdf
+  # The eigenvalue equation A v_j = w_j v_j fixes v_j only up to a (complex)
+  # scalar. LAPACK's geev fixes that scalar by normalising each v_j to have unit
+  # 2-norm and real largest-magnitude component, and we differentiate through
+  # that choice. See https://github.com/jax-ml/jax/issues/2748 for discussion.
+  n = w.shape[-1]
+  eye_n = lax._eye(w.dtype, (n, n))
+  with config.numpy_rank_promotion('allow'):
+    Fmat = lax.reciprocal(eye_n + w[..., None, :] - w[..., None]) - eye_n
+  P = dot(_solve(v, da), v)
+  dw = _extract_diagonal(P)
+  U = dot(v, Fmat * P)
+  # The eigenvalue equation gives dv_j = u_j + c_j v_j with c_j free; the two
+  # real LAPACK normalisation constraints fix c_j to
+  #   c_j = -Re(v_j* . u_j) - i Im(u_{k_j j}) / v_{k_j j},  k_j = argmax_i |v_ij|.
+  k = lax.argmax(lax.abs(v), axis=v.ndim - 2, index_dtype=np.int32)
+  mask = (lax.broadcasted_iota(np.int32, v.shape, v.ndim - 2)
+          == lax.expand_dims(k, (v.ndim - 2,))).astype(v.dtype)
+  c = lax.complex(-(v.conj() * U).sum(-2).real,
+                  -(mask * U).sum(-2).imag / (mask * v).sum(-2).real)
+  return dw, U + v * lax.expand_dims(c, (v.ndim - 2,))
+
 def eig_jvp_rule(primals, tangents, *, compute_left_eigenvectors,
-                 compute_right_eigenvectors, implementation):
-  if compute_left_eigenvectors or compute_right_eigenvectors:
-    raise NotImplementedError(
-        'The derivatives of non-symmetric eigenvectors are not supported. '
-        'Only first-order derivatives of eigenvalues are supported. See '
-        'https://github.com/jax-ml/jax/issues/2748 for discussion.')
-  # Formula for derivative of eigenvalues w.r.t. a is eqn 4.60 in
-  # https://arxiv.org/abs/1701.00392
+                 compute_right_eigenvectors, enable_eigvec_derivs,
+                 implementation):
   a, = primals
   da, = tangents
-  l, v = eig(a, compute_left_eigenvectors=False, implementation=implementation)
-  return [l], [(_solve(v, da.astype(v.dtype)) * _T(v)).sum(-1)]
+  if compute_left_eigenvectors or compute_right_eigenvectors:
+    if not enable_eigvec_derivs:
+      raise NotImplementedError(
+          'Derivatives of non-symmetric eigenvectors are only valid under '
+          'assumptions on the input that JAX cannot check (see the '
+          'enable_eigvec_derivs argument to jax.lax.linalg.eig). Pass '
+          'enable_eigvec_derivs=True to jax.lax.linalg.eig to opt in. See '
+          'https://github.com/jax-ml/jax/issues/2748 for discussion.')
+  outs = eig(a, compute_left_eigenvectors=compute_left_eigenvectors,
+             compute_right_eigenvectors=True,
+             enable_eigvec_derivs=enable_eigvec_derivs,
+             implementation=implementation)
+  w, vr = outs[0], outs[-1]
+  dot = partial(lax.dot if a.ndim == 2 else lax.batch_matmul,
+                precision=lax.Precision.HIGHEST)
+  da = da.astype(vr.dtype)
+  if not (compute_left_eigenvectors or compute_right_eigenvectors):
+    return [w], [(_solve(vr, da) * _T(vr)).sum(-1)]
+  dw, dvr = _eig_vec_jvp(dot, w, vr, da)
+  primal_out, tangent_out = [w], [dw]
+  if compute_left_eigenvectors:
+    vl = outs[1]
+    _, dvl = _eig_vec_jvp(dot, w.conj(), vl, _H(da))
+    primal_out.append(vl)
+    tangent_out.append(dvl)
+  if compute_right_eigenvectors:
+    primal_out.append(vr)
+    tangent_out.append(dvr)
+  return primal_out, tangent_out
 
 eig_p = linalg_primitive(
     _eig_dtype_rule, (_float | _complex,), (2,), _eig_shape_rule, "eig",
@@ -1392,7 +1446,7 @@ def _householder_product_lowering(ctx, a, taus):
     result_shapes = None
   op = mlir.custom_call(
       "ProductOfElementaryHouseholderReflectors",
-      result_types=mlir.flatten_ir_types(mlir.aval_to_ir_types(aval_out)),
+      result_types=mlir.flatten_ir_types(mlir.aval_to_ir_types(ctx.module_context, aval_out)),
       operands=[a, taus],
       api_version=1,
       result_shapes=result_shapes)
@@ -1466,7 +1520,7 @@ def ormqr(a: ArrayLike, taus: ArrayLike, c: ArrayLike, *,
     - :func:`jax.scipy.linalg.qr_multiply`: Higher-level API for computing
       Q @ C or C @ Q from a matrix ``a`` directly.
   """
-  a, taus, c = core.standard_insert_pvary(a, taus, c)
+  a, taus, c = core.auto_insert_reshard(a, taus, c)
   return ormqr_p.bind(a, taus, c, left=left, transpose=transpose)
 
 
@@ -1547,8 +1601,7 @@ ormqr_p = standard_linalg_primitive(
     _ormqr_shape_rule, "ormqr")
 mlir.register_lowering(ormqr_p, mlir.lower_fun(
     _ormqr_lowering, multiple_results=False))
-if jaxlib_extension_version >= 422:
-  register_cpu_gpu_lowering(ormqr_p, _ormqr_cpu_gpu_lowering)
+register_cpu_gpu_lowering(ormqr_p, _ormqr_cpu_gpu_lowering)
 
 
 # LU decomposition
@@ -1719,9 +1772,9 @@ def _lu_cpu_gpu_lowering(ctx, operand, *, target_name_prefix: str):
 
 def _lu_tpu_lowering_rule(ctx, operand):
   result_types = mlir.flatten_ir_types([
-      mlir.aval_to_ir_types(ctx.avals_out[0]),
-      mlir.aval_to_ir_types(ctx.avals_out[1]),
-      mlir.aval_to_ir_types(ctx.avals_out[2]),
+      mlir.aval_to_ir_types(ctx.module_context, ctx.avals_out[0]),
+      mlir.aval_to_ir_types(ctx.module_context, ctx.avals_out[1]),
+      mlir.aval_to_ir_types(ctx.module_context, ctx.avals_out[2]),
   ])
   if any(not is_constant_shape(a.shape) for a in ctx.avals_out):
     result_shapes = [
@@ -1860,7 +1913,7 @@ def _generic_lu_pivots_to_permutation(swaps, permutation_size):
   if m == 0 or k == 0:
     return permutation
   upper = np.array(k, np.int32) if is_constant_dim(k) else k
-  permutation, swaps = core.standard_insert_pvary(permutation, swaps)
+  permutation, swaps = core.auto_insert_reshard(permutation, swaps)
   result, _ = control_flow.fori_loop(np.array(0, np.int32), upper,
                                      _lu_pivots_body_fn, (permutation, swaps))
   return result
@@ -1922,8 +1975,8 @@ def _geqrf_dtype_rule(dtype):
   return dtype, dtype
 
 def _geqrf_lowering_rule(ctx, operand):
-  ts_type = mlir.aval_to_ir_type(ctx.avals_out[0])
-  r_type = mlir.aval_to_ir_type(ctx.avals_out[1])
+  ts_type = mlir.aval_to_ir_type(ctx.module_context, ctx.avals_out[0])
+  r_type = mlir.aval_to_ir_type(ctx.module_context, ctx.avals_out[1])
   result_types = [ts_type, r_type]
   if any(not is_constant_shape(aval_out.shape)
          for aval_out in ctx.avals_out):
@@ -1975,7 +2028,7 @@ def geqp3(a: ArrayLike, jpvt: ArrayLike, *,
     elementary Householder reflectors, and ``jpvt`` is the column-pivot indices
     such that ``a[:, jpvt] = q @ r``.
   """
-  a, jpvt = core.standard_insert_pvary(a, jpvt)
+  a, jpvt = core.auto_insert_reshard(a, jpvt)
   a_out, jpvt_out, taus = geqp3_p.bind(a, jpvt, use_magma=use_magma)
   return a_out, jpvt_out, taus
 
@@ -2706,7 +2759,7 @@ def _triangular_solve_lowering(
     ctx, a, b, *, left_side, lower, transpose_a, conjugate_a, unit_diagonal):
   out_aval, = ctx.avals_out
   if conjugate_a and not transpose_a:
-    a = chlo.ConjOp(a)
+    a = chlo.conj(a)
     conjugate_a = False
   if not transpose_a:
     transpose = "NO_TRANSPOSE"
@@ -3100,7 +3153,7 @@ def _sdy_rule_for_aval(letters, num_batch_dims, aval):
   prefix = "... " if num_batch_dims and d >= 0 else ""
   return prefix + " ".join(next(letters) for _ in range(d))
 
-def _build_sdy_sharding_rule(num_batch_dims, avals_in, avals_out):
+def _build_sdy_sharding_rule(module_context, num_batch_dims, avals_in, avals_out):
   letters = iter(string.ascii_letters)
   lhs = ", ".join(
       _sdy_rule_for_aval(letters, num_batch_dims, a) for a in avals_in)
@@ -3109,8 +3162,8 @@ def _build_sdy_sharding_rule(num_batch_dims, avals_in, avals_out):
   sdy_sharding_rule = str_to_sdy_sharding_rule(f"{lhs} -> {rhs}")
   return sdy_sharding_rule_to_mlir(
       sdy_sharding_rule,
-      mlir.flatten_ir_types(map(mlir.aval_to_ir_types, avals_in)),
-      mlir.flatten_ir_types(map(mlir.aval_to_ir_types, avals_out)))
+      mlir.flatten_ir_types(map(partial(mlir.aval_to_ir_types, module_context), avals_in)),
+      mlir.flatten_ir_types(map(partial(mlir.aval_to_ir_types, module_context), avals_out)))
 
 def _linalg_ffi_lowering(target_name, avals_in=None, avals_out=None,
                          operand_output_aliases=None, column_major=True,
@@ -3143,7 +3196,7 @@ def _linalg_ffi_lowering(target_name, avals_in=None, avals_out=None,
       extra_attributes = {"mhlo.frontend_attributes": frontend_attrs}
       if config.use_shardy_partitioner.value:
         extra_attributes["sdy.sharding_rule"] = _build_sdy_sharding_rule(
-            num_batch_dims, avals_in_, avals_out_)
+            ctx.module_context, num_batch_dims, avals_in_, avals_out_)
     else:
       extra_attributes = None
     rule = ffi.ffi_lowering(target_name, operand_layouts=operand_layouts,

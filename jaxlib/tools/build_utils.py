@@ -43,7 +43,7 @@ def create_wheel_sources_map(wheel_sources, root_packages):
   for source in wheel_sources:
     for package in root_packages:
       # Dealing with source files from the main repo
-      if source.startswith("{}/".format(package)):
+      if source.startswith(f"{package}/"):
         wheel_sources_map[source] = source
         continue
       # Dealing with source files from external repos
@@ -56,12 +56,12 @@ def create_wheel_sources_map(wheel_sources, root_packages):
           continue
         else:
           raise RuntimeError(
-              "Unexpected external source format: {}".format(source)
+              f"Unexpected external source format: {source}"
           )
       # Dealing with generated source
       # e.g. bazel-out/k8-opt/bin/jaxlib/mlir/_mlir_libs/_jax_mlir_ext.py
       # which should map to jaxlib/mlir/_mlir_libs/_jax_mlir_ext.py
-      root_package_ind = source.find("/{}/".format(package))
+      root_package_ind = source.find(f"/{package}/")
       if root_package_ind >= 0:
         wheel_sources_map[source[root_package_ind + 1:]] = source
   return wheel_sources_map
@@ -197,6 +197,18 @@ def update_setup_with_rocm_version(file_dir: pathlib.Path, rocm_version: str):
     content = f.read()
   content = content.replace(
       "rocm_version = 0  # placeholder", f"rocm_version = {rocm_version}"
+  )
+  with open(src_file, "w") as f:
+    f.write(content)
+
+def update_setup_with_oneapi_version(file_dir: pathlib.Path, oneapi_version: str):
+  src_file = file_dir / "setup.py"
+  with open(src_file) as f:
+    content = f.read()
+  # Sanitize oneapi_version to replace dots with underscores for package names
+  sanitized_version = oneapi_version.replace(".", "_")
+  content = content.replace(
+      "oneapi_version = 0  # placeholder", f"oneapi_version = '{sanitized_version}'"
   )
   with open(src_file, "w") as f:
     f.write(content)

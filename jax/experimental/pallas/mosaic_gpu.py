@@ -20,12 +20,14 @@ These APIs are highly unstable and can change weekly. Use at your own risk.
 from jax._src.pallas.mosaic_gpu.core import Barrier as Barrier
 from jax._src.pallas.mosaic_gpu.core import BlockSpec as BlockSpec
 from jax._src.pallas.mosaic_gpu.core import ClusterBarrier as ClusterBarrier
+from jax._src.pallas.mosaic_gpu.core import cluster_ref as cluster_ref
 from jax._src.pallas.mosaic_gpu.core import CompilerParams as CompilerParams
 from jax._src.pallas.mosaic_gpu.core import kernel as kernel
 from jax._src.pallas.mosaic_gpu.core import Layout as Layout
 from jax._src.pallas.mosaic_gpu.core import layout_cast as layout_cast
 from jax._src.pallas.mosaic_gpu.core import MemorySpace as MemorySpace
 from jax._src.pallas.mosaic_gpu.core import Mesh as Mesh
+from jax._src.pallas.mosaic_gpu.core import TraceScope as TraceScope
 from jax._src.pallas.mosaic_gpu.core import multicast_ref as multicast_ref
 from jax._src.pallas.mosaic_gpu.core import PeerMemRef as PeerMemRef
 from jax._src.pallas.mosaic_gpu.core import RefUnion as RefUnion
@@ -36,7 +38,6 @@ from jax._src.pallas.mosaic_gpu.core import TilingTransform as TilingTransform
 from jax._src.pallas.mosaic_gpu.core import TMEMLayout as TMEMLayout
 from jax._src.pallas.mosaic_gpu.core import transform_ref as transform_ref
 from jax._src.pallas.mosaic_gpu.core import transpose_ref as transpose_ref
-from jax._src.pallas.mosaic_gpu.core import TransposeTransform as TransposeTransform
 from jax._src.pallas.mosaic_gpu.core import TryClusterCancelResult as TryClusterCancelResult
 from jax._src.pallas.mosaic_gpu.core import unswizzle_ref as unswizzle_ref
 from jax._src.pallas.mosaic_gpu.core import untile_ref as untile_ref
@@ -66,6 +67,7 @@ from jax._src.pallas.mosaic_gpu.primitives import atomic_min as atomic_min
 from jax._src.pallas.mosaic_gpu.primitives import atomic_or as atomic_or
 from jax._src.pallas.mosaic_gpu.primitives import atomic_xor as atomic_xor
 from jax._src.pallas.mosaic_gpu.primitives import barrier_arrive as barrier_arrive
+from jax._src.pallas.mosaic_gpu.primitives import barrier_test as barrier_test
 from jax._src.pallas.mosaic_gpu.primitives import barrier_wait as barrier_wait
 from jax._src.pallas.mosaic_gpu.primitives import broadcasted_iota as broadcasted_iota
 from jax._src.pallas.mosaic_gpu.primitives import commit_smem as commit_smem
@@ -73,6 +75,7 @@ from jax._src.pallas.mosaic_gpu.primitives import commit_smem_to_gmem_group as c
 from jax._src.pallas.mosaic_gpu.primitives import commit_tmem as commit_tmem
 from jax._src.pallas.mosaic_gpu.primitives import copy_gmem_to_smem as copy_gmem_to_smem
 from jax._src.pallas.mosaic_gpu.primitives import copy_smem_to_gmem as copy_smem_to_gmem
+from jax._src.pallas.mosaic_gpu.primitives import async_store_smem as async_store_smem
 from jax._src.pallas.mosaic_gpu.primitives import inline_mgpu as inline_mgpu
 from jax._src.pallas.mosaic_gpu.primitives import load as load
 from jax._src.pallas.mosaic_gpu.primitives import multimem_load_reduce as multimem_load_reduce
@@ -80,8 +83,10 @@ from jax._src.pallas.mosaic_gpu.primitives import multimem_store as multimem_sto
 from jax._src.pallas.mosaic_gpu.primitives import print_layout as print_layout
 from jax._src.pallas.mosaic_gpu.primitives import query_cluster_cancel as query_cluster_cancel
 from jax._src.pallas.mosaic_gpu.primitives import RefType as RefType
+from jax._src.pallas.mosaic_gpu.primitives import semaphore_signal as semaphore_signal
 from jax._src.pallas.mosaic_gpu.primitives import semaphore_signal_multicast as semaphore_signal_multicast
 from jax._src.pallas.mosaic_gpu.primitives import semaphore_signal_parallel as semaphore_signal_parallel
+from jax._src.pallas.mosaic_gpu.primitives import semaphore_wait as semaphore_wait
 from jax._src.pallas.mosaic_gpu.primitives import SemaphoreSignal as SemaphoreSignal
 from jax._src.pallas.mosaic_gpu.primitives import set_max_registers as set_max_registers
 from jax._src.pallas.mosaic_gpu.primitives import ShapeDtypeStruct as ShapeDtypeStruct

@@ -988,24 +988,20 @@ class PullBlockSpecTest(jtu.JaxTestCase):
     def outer(refs):
       ref, y_ref = refs
 
-      def f(x):
+      def f(values, x):
+        ref, = values
         return ref.swap(x)
 
       in_type = jax.ShapeDtypeStruct((512, 1024), jnp.int32)
-      f2, new_values, scalar_prefetch_values = block_spec_lib.get_fusion_values(
-          f, in_type
-      )
-      self.assertLen(new_values, 1)  # Captures Ref
-      self.assertEmpty(scalar_prefetch_values)
-
+      scalar_prefetch_values = ()
       block_spec = pl.BlockSpec((256, 512), lambda i, j, k: (i, k))
       kernel_fn, (value_block_specs, x_block_spec), _ = (
           block_spec_lib.pull_block_spec(
-              f2,
+              f,
               block_spec,
               grid_len=3,
               scalar_prefetch_handler=block_spec_lib.make_scalar_prefetch_handler(),
-          )(new_values, in_type)
+          )((ref,), in_type)
       )
       self.assertLen(value_block_specs, 1)
       self.assertEqual(x_block_spec.index_map(0, 1, 2), (0, 2))
@@ -1230,6 +1226,72 @@ class PullBlockSpecTest(jtu.JaxTestCase):
     self.assertEmpty(value_block_specs)
     self.assertEqual(in_block_spec.block_shape, (128, 128))
     self.assertEqual(in_block_spec.pipeline_mode, pmode)
+
+  def test_block_index_transform_slice_symbolic_equivalence(self):
+    in_type = (jax.ShapeDtypeStruct((2, 512, 512), jnp.float32),)
+
+    def fn(x):
+      # test symbolic equivalence of block index transforms, the below will
+      # not create BlockIndexTransforms that are equal as objects
+      y = x[0]
+      z = x[0]
+      return lax.add(y, z)
+
+    f2, new_values, scalar_prefetch_values = block_spec_lib.get_fusion_values(
+        fn, *in_type
+    )
+    self.assertEmpty(new_values)
+    self.assertEmpty(scalar_prefetch_values)
+
+    block_spec = pl.BlockSpec((128, 128), lambda i, j, k: (i, j))
+    kernel_fn, (value_block_specs, *in_block_specs), _ = (
+        block_spec_lib.pull_block_spec(
+            f2,
+            block_spec,
+            grid_len=3,
+            scalar_prefetch_handler=block_spec_lib.make_scalar_prefetch_handler(),
+        )(new_values, *in_type)
+    )
+    self.assertEmpty(value_block_specs)
+    x_block_spec_1 = in_block_specs[0]
+
+    self.assertEqual(x_block_spec_1.block_shape, (None, 128, 128))
+    self.assertEqual(x_block_spec_1.index_map(0, 1, 2), (0, 0, 1))
+    x = np.ones((2, 128, 128), dtype=np.float32)
+    # kernel_fn does no slicing/squeezing, that is left to blockspec machinery
+    x_block = np.ones((128, 128), dtype=np.float32)
+    np.testing.assert_array_equal(
+        kernel_fn((0, 0, 0), scalar_prefetch_values, (), x_block),
+        fn(x),
+    )
+
+  def test_block_index_transform_slice_symbolic_non_equivalence(self):
+    in_type = (jax.ShapeDtypeStruct((2, 512, 512), jnp.float32),)
+
+    def fn(x):
+      # test symbolic non-equivalence of block index transforms, the below will
+      # create different BlockIndexTransforms
+      y = x[0]
+      z = x[1]
+      return lax.add(y, z)
+
+    f2, new_values, scalar_prefetch_values = block_spec_lib.get_fusion_values(
+        fn, *in_type
+    )
+    self.assertEmpty(new_values)
+    self.assertEmpty(scalar_prefetch_values)
+
+    block_spec = pl.BlockSpec((128, 128), lambda i, j, k: (i, j))
+    with self.assertRaisesRegex(ValueError, 'cannot uniquely pull block specs'):
+      kernel_fn, (value_block_specs, *in_block_specs), _ = (
+          block_spec_lib.pull_block_spec(
+              f2,
+              block_spec,
+              grid_len=3,
+              scalar_prefetch_handler=block_spec_lib.make_scalar_prefetch_handler(),
+          )(new_values, *in_type)
+      )
+      del kernel_fn, value_block_specs, in_block_specs
 
 
 class PullBlockSpecHOPTest(jtu.JaxTestCase):

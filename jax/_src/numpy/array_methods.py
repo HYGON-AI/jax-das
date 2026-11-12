@@ -665,8 +665,9 @@ _accepted_binop_types = (
 )
 
 def _operator_eq(self, other):
-  if hasattr(other, '__jax_array__'):
-    other = other.__jax_array__()
+  m = getattr(other, '__jax_array__', None)
+  if m is not None:
+    other = m()
   if isinstance(other, _accepted_binop_types):
     return ufuncs.equal(self, cast(ArrayLike, other))
   # Explicitly reject non-array inputs to avoid Python returning scalar False.
@@ -678,8 +679,9 @@ def _operator_eq(self, other):
   return NotImplemented
 
 def _operator_ne(self, other):
-  if hasattr(other, '__jax_array__'):
-    other = other.__jax_array__()
+  m = getattr(other, '__jax_array__', None)
+  if m is not None:
+    other = m()
   if isinstance(other, _accepted_binop_types):
     return ufuncs.not_equal(self, cast(ArrayLike, other))
   # Explicitly reject non-array inputs to avoid Python returning scalar True.
@@ -691,36 +693,41 @@ def _operator_ne(self, other):
   return NotImplemented
 
 def _operator_lt(self, other):
-  if hasattr(other, '__jax_array__'):
-    other = other.__jax_array__()
+  m = getattr(other, '__jax_array__', None)
+  if m is not None:
+    other = m()
   if isinstance(other, _accepted_binop_types):
     return ufuncs.less(self, cast(ArrayLike, other))
   return NotImplemented
 
 def _operator_le(self, other):
-  if hasattr(other, '__jax_array__'):
-    other = other.__jax_array__()
+  m = getattr(other, '__jax_array__', None)
+  if m is not None:
+    other = m()
   if isinstance(other, _accepted_binop_types):
     return ufuncs.less_equal(self, cast(ArrayLike, other))
   return NotImplemented
 
 def _operator_gt(self, other):
-  if hasattr(other, '__jax_array__'):
-    other = other.__jax_array__()
+  m = getattr(other, '__jax_array__', None)
+  if m is not None:
+    other = m()
   if isinstance(other, _accepted_binop_types):
     return ufuncs.greater(self, cast(ArrayLike, other))
   return NotImplemented
 
 def _operator_ge(self, other):
-  if hasattr(other, '__jax_array__'):
-    other = other.__jax_array__()
+  m = getattr(other, '__jax_array__', None)
+  if m is not None:
+    other = m()
   if isinstance(other, _accepted_binop_types):
     return ufuncs.greater_equal(self, cast(ArrayLike, other))
   return NotImplemented
 
 def _operator_add(self, other):
-  if hasattr(other, '__jax_array__'):
-    other = other.__jax_array__()
+  m = getattr(other, '__jax_array__', None)
+  if m is not None:
+    other = m()
   if isinstance(other, _accepted_binop_types):
     return ufuncs.add(self, cast(ArrayLike, other))
   # Explicitly reject sequences where __add__ may indicate concatenation.
@@ -731,8 +738,9 @@ def _operator_add(self, other):
   return NotImplemented
 
 def _operator_radd(self, other):
-  if hasattr(other, '__jax_array__'):
-    other = other.__jax_array__()
+  m = getattr(other, '__jax_array__', None)
+  if m is not None:
+    other = m()
   if isinstance(other, _accepted_binop_types):
     return ufuncs.add(cast(ArrayLike, other), self)
   # Explicitly reject sequences where __add__ may indicate concatenation.
@@ -743,22 +751,25 @@ def _operator_radd(self, other):
   return NotImplemented
 
 def _operator_sub(self, other):
-  if hasattr(other, '__jax_array__'):
-    other = other.__jax_array__()
+  m = getattr(other, '__jax_array__', None)
+  if m is not None:
+    other = m()
   if isinstance(other, _accepted_binop_types):
     return ufuncs.subtract(self, cast(ArrayLike, other))
   return NotImplemented
 
 def _operator_rsub(self, other):
-  if hasattr(other, '__jax_array__'):
-    other = other.__jax_array__()
+  m = getattr(other, '__jax_array__', None)
+  if m is not None:
+    other = m()
   if isinstance(other, _accepted_binop_types):
     return ufuncs.subtract(cast(ArrayLike, other), self)
   return NotImplemented
 
 def _operator_mul(self, other):
-  if hasattr(other, '__jax_array__'):
-    other = other.__jax_array__()
+  m = getattr(other, '__jax_array__', None)
+  if m is not None:
+    other = m()
   if isinstance(other, _accepted_binop_types):
     return ufuncs.multiply(self, cast(ArrayLike, other))
   # Explicitly reject sequences where __mul__ may indicate concatenation.
@@ -769,8 +780,9 @@ def _operator_mul(self, other):
   return NotImplemented
 
 def _operator_rmul(self, other):
-  if hasattr(other, '__jax_array__'):
-    other = other.__jax_array__()
+  m = getattr(other, '__jax_array__', None)
+  if m is not None:
+    other = m()
   if isinstance(other, _accepted_binop_types):
     return ufuncs.multiply(cast(ArrayLike, other), self)
   # Explicitly reject sequences where __mul__ may indicate concatenation.
@@ -781,155 +793,177 @@ def _operator_rmul(self, other):
   return NotImplemented
 
 def _operator_truediv(self, other):
-  if hasattr(other, '__jax_array__'):
-    other = other.__jax_array__()
+  m = getattr(other, '__jax_array__', None)
+  if m is not None:
+    other = m()
   if isinstance(other, _accepted_binop_types):
     return ufuncs.true_divide(self, cast(ArrayLike, other))
   return NotImplemented
 
 def _operator_rtruediv(self, other):
-  if hasattr(other, '__jax_array__'):
-    other = other.__jax_array__()
+  m = getattr(other, '__jax_array__', None)
+  if m is not None:
+    other = m()
   if isinstance(other, _accepted_binop_types):
     return ufuncs.true_divide(cast(ArrayLike, other), self)
   return NotImplemented
 
 def _operator_floordiv(self, other):
-  if hasattr(other, '__jax_array__'):
-    other = other.__jax_array__()
+  m = getattr(other, '__jax_array__', None)
+  if m is not None:
+    other = m()
   if isinstance(other, _accepted_binop_types):
     return ufuncs.floor_divide(self, cast(ArrayLike, other))
   return NotImplemented
 
 def _operator_rfloordiv(self, other):
-  if hasattr(other, '__jax_array__'):
-    other = other.__jax_array__()
+  m = getattr(other, '__jax_array__', None)
+  if m is not None:
+    other = m()
   if isinstance(other, _accepted_binop_types):
     return ufuncs.floor_divide(cast(ArrayLike, other), self)
   return NotImplemented
 
 def _operator_divmod(self, other):
-  if hasattr(other, '__jax_array__'):
-    other = other.__jax_array__()
+  m = getattr(other, '__jax_array__', None)
+  if m is not None:
+    other = m()
   if isinstance(other, _accepted_binop_types):
     return ufuncs.divmod(self, cast(ArrayLike, other))
   return NotImplemented
 
 def _operator_rdivmod(self, other):
-  if hasattr(other, '__jax_array__'):
-    other = other.__jax_array__()
+  m = getattr(other, '__jax_array__', None)
+  if m is not None:
+    other = m()
   if isinstance(other, _accepted_binop_types):
     return ufuncs.divmod(cast(ArrayLike, other), self)
   return NotImplemented
 
 def _operator_mod(self, other):
-  if hasattr(other, '__jax_array__'):
-    other = other.__jax_array__()
+  m = getattr(other, '__jax_array__', None)
+  if m is not None:
+    other = m()
   if isinstance(other, _accepted_binop_types):
     return ufuncs.mod(self, cast(ArrayLike, other))
   return NotImplemented
 
 def _operator_rmod(self, other):
-  if hasattr(other, '__jax_array__'):
-    other = other.__jax_array__()
+  m = getattr(other, '__jax_array__', None)
+  if m is not None:
+    other = m()
   if isinstance(other, _accepted_binop_types):
     return ufuncs.mod(cast(ArrayLike, other), self)
   return NotImplemented
 
 def _operator_pow(self, other):
-  if hasattr(other, '__jax_array__'):
-    other = other.__jax_array__()
+  m = getattr(other, '__jax_array__', None)
+  if m is not None:
+    other = m()
   if isinstance(other, _accepted_binop_types):
     return ufuncs.power(self, cast(ArrayLike, other))
   return NotImplemented
 
 def _operator_rpow(self, other):
-  if hasattr(other, '__jax_array__'):
-    other = other.__jax_array__()
+  m = getattr(other, '__jax_array__', None)
+  if m is not None:
+    other = m()
   if isinstance(other, _accepted_binop_types):
     return ufuncs.power(cast(ArrayLike, other), self)
   return NotImplemented
 
 def _operator_matmul(self, other):
-  if hasattr(other, '__jax_array__'):
-    other = other.__jax_array__()
+  m = getattr(other, '__jax_array__', None)
+  if m is not None:
+    other = m()
   if isinstance(other, _accepted_binop_types):
     return tensor_contractions.matmul(self, cast(ArrayLike, other))
   return NotImplemented
 
 def _operator_rmatmul(self, other):
-  if hasattr(other, '__jax_array__'):
-    other = other.__jax_array__()
+  m = getattr(other, '__jax_array__', None)
+  if m is not None:
+    other = m()
   if isinstance(other, _accepted_binop_types):
     return tensor_contractions.matmul(cast(ArrayLike, other), self)
   return NotImplemented
 
 def _operator_and(self, other):
-  if hasattr(other, '__jax_array__'):
-    other = other.__jax_array__()
+  m = getattr(other, '__jax_array__', None)
+  if m is not None:
+    other = m()
   if isinstance(other, _accepted_binop_types):
     return ufuncs.bitwise_and(self, cast(ArrayLike, other))
   return NotImplemented
 
 def _operator_rand(self, other):
-  if hasattr(other, '__jax_array__'):
-    other = other.__jax_array__()
+  m = getattr(other, '__jax_array__', None)
+  if m is not None:
+    other = m()
   if isinstance(other, _accepted_binop_types):
     return ufuncs.bitwise_and(cast(ArrayLike, other), self)
   return NotImplemented
 
 def _operator_or(self, other):
-  if hasattr(other, '__jax_array__'):
-    other = other.__jax_array__()
+  m = getattr(other, '__jax_array__', None)
+  if m is not None:
+    other = m()
   if isinstance(other, _accepted_binop_types):
     return ufuncs.bitwise_or(self, cast(ArrayLike, other))
   return NotImplemented
 
 def _operator_ror(self, other):
-  if hasattr(other, '__jax_array__'):
-    other = other.__jax_array__()
+  m = getattr(other, '__jax_array__', None)
+  if m is not None:
+    other = m()
   if isinstance(other, _accepted_binop_types):
     return ufuncs.bitwise_or(cast(ArrayLike, other), self)
   return NotImplemented
 
 def _operator_xor(self, other):
-  if hasattr(other, '__jax_array__'):
-    other = other.__jax_array__()
+  m = getattr(other, '__jax_array__', None)
+  if m is not None:
+    other = m()
   if isinstance(other, _accepted_binop_types):
     return ufuncs.bitwise_xor(self, cast(ArrayLike, other))
   return NotImplemented
 
 def _operator_rxor(self, other):
-  if hasattr(other, '__jax_array__'):
-    other = other.__jax_array__()
+  m = getattr(other, '__jax_array__', None)
+  if m is not None:
+    other = m()
   if isinstance(other, _accepted_binop_types):
     return ufuncs.bitwise_xor(cast(ArrayLike, other), self)
   return NotImplemented
 
 def _operator_lshift(self, other):
-  if hasattr(other, '__jax_array__'):
-    other = other.__jax_array__()
+  m = getattr(other, '__jax_array__', None)
+  if m is not None:
+    other = m()
   if isinstance(other, _accepted_binop_types):
     return ufuncs.left_shift(self, cast(ArrayLike, other))
   return NotImplemented
 
 def _operator_rshift(self, other):
-  if hasattr(other, '__jax_array__'):
-    other = other.__jax_array__()
+  m = getattr(other, '__jax_array__', None)
+  if m is not None:
+    other = m()
   if isinstance(other, _accepted_binop_types):
     return ufuncs.right_shift(self, cast(ArrayLike, other))
   return NotImplemented
 
 def _operator_rlshift(self, other):
-  if hasattr(other, '__jax_array__'):
-    other = other.__jax_array__()
+  m = getattr(other, '__jax_array__', None)
+  if m is not None:
+    other = m()
   if isinstance(other, _accepted_binop_types):
     return ufuncs.left_shift(cast(ArrayLike, other), self)
   return NotImplemented
 
 def _operator_rrshift(self, other):
-  if hasattr(other, '__jax_array__'):
-    other = other.__jax_array__()
+  m = getattr(other, '__jax_array__', None)
+  if m is not None:
+    other = m()
   if isinstance(other, _accepted_binop_types):
     return ufuncs.right_shift(cast(ArrayLike, other), self)
   return NotImplemented
@@ -957,7 +991,7 @@ _HANDLED_ARRAY_TYPES = _JAX_ARRAY_TYPES + (np.ndarray,)
 
 def __array_module__(self, types):
   if all(issubclass(t, _HANDLED_ARRAY_TYPES) for t in types):
-    import jax.numpy  # pytype: disable=import-error
+    import jax.numpy  # pyrefly: ignore[missing-import]
     return jax.numpy
   else:
     return NotImplemented
@@ -983,10 +1017,6 @@ def _multi_slice(self: Array,
 
 # The next two functions are related to iter(array), implemented here to
 # avoid circular imports.
-@api.jit
-def _unstack(x: Array) -> list[Array]:
-  dims = (0,)
-  return [lax.squeeze(t, dims) for t in lax.split(x, (1,) * x.shape[0])]
 
 def _chunk_iter(x, size):
   if size > x.shape[0]:
@@ -1229,6 +1259,7 @@ class _IndexUpdateRef:
   def subtract(self, values: ArrayLike, *,
                indices_are_sorted: bool = False, unique_indices: bool = False,
                mode: str | lax_slicing.GatherScatterMode | None = None,
+               out_sharding: NamedSharding | PartitionSpec | None = None,
                wrap_negative_indices: bool = True) -> Array:
     """Pure equivalent of ``x[idx] -= y``.
 
@@ -1237,16 +1268,21 @@ class _IndexUpdateRef:
 
     See :func:`jax.numpy.ndarray.at` for details.
     """
-    return scatter._scatter_update(self.array, self.index, values,
-                                   lax_slicing.scatter_sub,
-                                   indices_are_sorted=indices_are_sorted,
-                                   unique_indices=unique_indices, mode=mode,
-                                   normalize_indices=wrap_negative_indices)
+    if out_sharding is not None:
+      assert isinstance(out_sharding, (NamedSharding, PartitionSpec))
+      out_sharding = canonicalize_sharding(out_sharding, ".subtract")
+    return scatter._scatter_update(
+        self.array, self.index, values, lax_slicing.scatter_sub,
+        indices_are_sorted=indices_are_sorted, unique_indices=unique_indices,
+        mode=mode, out_sharding=out_sharding,
+        normalize_indices=wrap_negative_indices)
 
-  def multiply(self, values: ArrayLike, *,
-               indices_are_sorted: bool = False, unique_indices: bool = False,
-               mode: str | lax_slicing.GatherScatterMode | None = None,
-               wrap_negative_indices: bool = True) -> Array:
+  def multiply(
+      self, values: ArrayLike, *, indices_are_sorted: bool = False,
+      unique_indices: bool = False,
+      mode: str | lax_slicing.GatherScatterMode | None = None,
+      out_sharding: NamedSharding | PartitionSpec | None = None,
+      wrap_negative_indices: bool = True) -> Array:
     """Pure equivalent of ``x[idx] *= y``.
 
     Returns the value of ``x`` that would result from the NumPy-style
@@ -1254,17 +1290,23 @@ class _IndexUpdateRef:
 
     See :func:`jax.numpy.ndarray.at` for details.
     """
-    return scatter._scatter_update(self.array, self.index, values,
-                                   lax_slicing.scatter_mul,
-                                   indices_are_sorted=indices_are_sorted,
-                                   unique_indices=unique_indices,
-                                   mode=mode, normalize_indices=wrap_negative_indices)
+    if out_sharding is not None:
+      assert isinstance(out_sharding, (NamedSharding, PartitionSpec))
+      out_sharding = canonicalize_sharding(out_sharding, ".multiply")
+    return scatter._scatter_update(
+        self.array, self.index, values, lax_slicing.scatter_mul,
+        indices_are_sorted=indices_are_sorted, unique_indices=unique_indices,
+        mode=mode, out_sharding=out_sharding,
+        normalize_indices=wrap_negative_indices)
+
   mul = multiply
 
-  def divide(self, values: ArrayLike, *,
-             indices_are_sorted: bool = False, unique_indices: bool = False,
-             mode: str | lax_slicing.GatherScatterMode | None = None,
-             wrap_negative_indices: bool = True) -> Array:
+  def divide(
+      self, values: ArrayLike, *, indices_are_sorted: bool = False,
+      unique_indices: bool = False,
+      mode: str | lax_slicing.GatherScatterMode | None = None,
+      out_sharding: NamedSharding | PartitionSpec | None = None,
+      wrap_negative_indices: bool = True) -> Array:
     """Pure equivalent of ``x[idx] /= y``.
 
     Returns the value of ``x`` that would result from the NumPy-style
@@ -1272,18 +1314,24 @@ class _IndexUpdateRef:
 
     See :func:`jax.numpy.ndarray.at` for details.
     """
+    if out_sharding is not None:
+      assert isinstance(out_sharding, (NamedSharding, PartitionSpec))
+      out_sharding = canonicalize_sharding(out_sharding, ".divide")
     return ufuncs.divide(
-      self.array,
-      scatter._scatter_update(array_creation.ones_like(self.array), self.index, values,
-                              lax_slicing.scatter_mul,
-                              indices_are_sorted=indices_are_sorted,
-                              unique_indices=unique_indices, mode=mode,
-                              normalize_indices=wrap_negative_indices))
+        self.array,
+        scatter._scatter_update(
+            array_creation.ones_like(self.array), self.index,
+            values, lax_slicing.scatter_mul,
+            indices_are_sorted=indices_are_sorted, unique_indices=unique_indices,
+            mode=mode, out_sharding=out_sharding,
+            normalize_indices=wrap_negative_indices))
 
-  def power(self, values: ArrayLike, *,
-            indices_are_sorted: bool = False, unique_indices: bool = False,
-            mode: str | lax_slicing.GatherScatterMode | None = None,
-            wrap_negative_indices: bool = True) -> Array:
+  def power(
+      self, values: ArrayLike, *, indices_are_sorted: bool = False,
+      unique_indices: bool = False,
+      mode: str | lax_slicing.GatherScatterMode | None = None,
+      out_sharding: NamedSharding | PartitionSpec | None = None,
+      wrap_negative_indices: bool = True) -> Array:
     """Pure equivalent of ``x[idx] **= y``.
 
     Returns the value of ``x`` that would result from the NumPy-style
@@ -1291,18 +1339,25 @@ class _IndexUpdateRef:
 
     See :func:`jax.numpy.ndarray.at` for details.
     """
+    if out_sharding is not None:
+      assert isinstance(out_sharding, (NamedSharding, PartitionSpec))
+      out_sharding = canonicalize_sharding(out_sharding, ".power")
     return ufuncs.power(
-      self.array,
-      scatter._scatter_update(array_creation.ones_like(self.array), self.index, values,
-                              lax_slicing.scatter_mul,
-                              indices_are_sorted=indices_are_sorted,
-                              unique_indices=unique_indices, mode=mode,
-                              normalize_indices=wrap_negative_indices))
+        self.array,
+        scatter._scatter_update(
+            array_creation.ones_like(self.array),
+            self.index, values, lax_slicing.scatter_mul,
+            indices_are_sorted=indices_are_sorted,
+            unique_indices=unique_indices, mode=mode,
+            out_sharding=out_sharding,
+            normalize_indices=wrap_negative_indices))
 
-  def min(self, values: ArrayLike, *,
-          indices_are_sorted: bool = False, unique_indices: bool = False,
-          mode: str | lax_slicing.GatherScatterMode | None = None,
-          wrap_negative_indices: bool = True) -> Array:
+  def min(
+      self, values: ArrayLike, *, indices_are_sorted: bool = False,
+      unique_indices: bool = False,
+      mode: str | lax_slicing.GatherScatterMode | None = None,
+      out_sharding: NamedSharding | PartitionSpec | None = None,
+      wrap_negative_indices: bool = True) -> Array:
     """Pure equivalent of ``x[idx] = minimum(x[idx], y)``.
 
     Returns the value of ``x`` that would result from the NumPy-style
@@ -1311,16 +1366,21 @@ class _IndexUpdateRef:
 
     See :func:`jax.numpy.ndarray.at` for details.
     """
-    return scatter._scatter_update(self.array, self.index, values,
-                                   lax_slicing.scatter_min,
-                                   indices_are_sorted=indices_are_sorted,
-                                   unique_indices=unique_indices, mode=mode,
-                                   normalize_indices=wrap_negative_indices)
+    if out_sharding is not None:
+      assert isinstance(out_sharding, (NamedSharding, PartitionSpec))
+      out_sharding = canonicalize_sharding(out_sharding, ".min")
+    return scatter._scatter_update(
+        self.array, self.index, values, lax_slicing.scatter_min,
+        indices_are_sorted=indices_are_sorted, unique_indices=unique_indices,
+        mode=mode, out_sharding=out_sharding,
+        normalize_indices=wrap_negative_indices)
 
-  def max(self, values: ArrayLike, *,
-          indices_are_sorted: bool = False, unique_indices: bool = False,
-          mode: str | lax_slicing.GatherScatterMode | None = None,
-          wrap_negative_indices: bool = True) -> Array:
+  def max(
+      self, values: ArrayLike, *, indices_are_sorted: bool = False,
+      unique_indices: bool = False,
+      mode: str | lax_slicing.GatherScatterMode | None = None,
+      out_sharding: NamedSharding | PartitionSpec | None = None,
+      wrap_negative_indices: bool = True) -> Array:
     """Pure equivalent of ``x[idx] = maximum(x[idx], y)``.
 
     Returns the value of ``x`` that would result from the NumPy-style
@@ -1329,11 +1389,16 @@ class _IndexUpdateRef:
 
     See :func:`jax.numpy.ndarray.at` for details.
     """
-    return scatter._scatter_update(self.array, self.index, values,
-                                   lax_slicing.scatter_max,
-                                   indices_are_sorted=indices_are_sorted,
-                                   unique_indices=unique_indices, mode=mode,
-                                   normalize_indices=wrap_negative_indices)
+    if out_sharding is not None:
+      assert isinstance(out_sharding, (NamedSharding, PartitionSpec))
+      out_sharding = canonicalize_sharding(out_sharding, ".max")
+    return scatter._scatter_update(
+        self.array, self.index, values, lax_slicing.scatter_max,
+        indices_are_sorted=indices_are_sorted,
+        unique_indices=unique_indices,
+        mode=mode, out_sharding=out_sharding,
+        normalize_indices=wrap_negative_indices)
+
 
 _array_operators: dict[str, Callable[..., Any]] = {
   "getitem": _getitem,
@@ -1434,7 +1499,7 @@ _array_methods = {
 
 _impl_only_array_methods = {
   "_chunk_iter": _chunk_iter,
-  "_unstack": _unstack,
+  "_unstack": lax.unstack,
 }
 
 _array_properties = {

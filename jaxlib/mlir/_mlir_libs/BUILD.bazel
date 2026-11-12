@@ -183,9 +183,6 @@ nanobind_pywrap_extension(
     deps = [
         "//jaxlib:hash_util",
         "//jaxlib/mosaic/dialect/gpu:gpu_dialect_capi",
-        "//jaxlib/mosaic/gpu:tiled_layout",
-        "//jaxlib/mosaic/gpu:transfer_plan",
-        "//jaxlib/mosaic/gpu:transforms",
         "@llvm-project//mlir:CAPIDebug",
         "@llvm-project//mlir:CAPIIR",
         "@llvm-project//mlir:CAPITransforms",
@@ -297,6 +294,7 @@ nanobind_pywrap_extension(
         "@com_google_absl//absl/strings:str_format",
         "@com_google_absl//absl/types:span",
         "@llvm-project//llvm:Support",
+        "@llvm-project//mlir:ArithDialect",
         "@llvm-project//mlir:CAPIArith",
         "@llvm-project//mlir:CAPICF",
         "@llvm-project//mlir:CAPIDebug",

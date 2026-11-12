@@ -230,6 +230,16 @@ class JetTrace(core.Trace):
     else:
       return val, zero_series
 
+  def stage_value(self, val):
+    primal, series = self.to_primal_terms_pair(val)
+    new_primal = self.parent_trace.stage_value(primal)
+    if series is zero_series:
+      new_series = zero_series
+    else:
+      new_series = [t if t is zero_term else self.parent_trace.stage_value(t)
+                    for t in series]
+    return JetTracer(self, new_primal, new_series)
+
   def process_primitive(self, primitive, tracers, params, /):
     order = self.order
     primals_in, series_in = unzip2(map(self.to_primal_terms_pair, tracers))
@@ -345,6 +355,8 @@ deflinear(lax.convert_element_type_p)
 deflinear(lax.broadcast_in_dim_p)
 deflinear(lax.concatenate_p)
 deflinear(lax.split_p)
+deflinear(lax.stack_p)
+deflinear(lax.unstack_p)
 deflinear(lax.pad_p)
 deflinear(lax.reshape_p)
 deflinear(lax.squeeze_p)

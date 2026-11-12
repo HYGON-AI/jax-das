@@ -174,7 +174,7 @@ def dynamic_slice(
   start_indices = _dynamic_slice_indices(
       operand, start_indices, allow_negative_indices)
   sizes = core.canonicalize_shape(slice_sizes)
-  operand, *start_indices = core.standard_insert_pvary(operand, *start_indices)
+  operand, *start_indices = core.auto_insert_reshard(operand, *start_indices)
   return dynamic_slice_p.bind(operand, *start_indices, slice_sizes=tuple(sizes))
 
 
@@ -235,7 +235,7 @@ def dynamic_update_slice(
   """
   start_indices = _dynamic_slice_indices(
       operand, start_indices, allow_negative_indices)
-  operand, update, *start_indices = core.standard_insert_pvary(
+  operand, update, *start_indices = core.auto_insert_reshard(
       operand, update, *start_indices)
   return dynamic_update_slice_p.bind(operand, update, *start_indices)
 
@@ -421,7 +421,7 @@ def gather(operand: ArrayLike, start_indices: ArrayLike,
         raise ValueError(f"Unsupported dtype for gather fill_value {dtype}")
   else:
     fill_value = None
-  operand, start_indices = core.standard_insert_pvary(operand, start_indices)
+  operand, start_indices = core.auto_insert_reshard(operand, start_indices)
   return gather_p.bind(
       operand, start_indices, dimension_numbers=dimension_numbers,
       slice_sizes=core.canonicalize_shape(slice_sizes),
@@ -548,7 +548,7 @@ def scatter_add(
   """
   jaxpr, consts = lax._reduction_jaxpr(lax.add,
                                        core.typeof(lax._const(operand, 0)))
-  operand, scatter_indices, updates = core.standard_insert_pvary(
+  operand, scatter_indices, updates = core.auto_insert_reshard(
       operand, scatter_indices, updates)
   return scatter_add_p.bind(
       operand, scatter_indices, updates, update_jaxpr=jaxpr,
@@ -605,7 +605,7 @@ def scatter_sub(
   jaxpr, consts = lax._reduction_jaxpr(
       lax.sub, core.typeof(lax._const(operand, 0))
   )
-  operand, scatter_indices, updates = core.standard_insert_pvary(
+  operand, scatter_indices, updates = core.auto_insert_reshard(
       operand, scatter_indices, updates)
   return scatter_sub_p.bind(
       operand,
@@ -662,7 +662,7 @@ def scatter_mul(
   """
   jaxpr, consts = lax._reduction_jaxpr(lax.mul,
                                        core.typeof(lax._const(operand, 1)))
-  operand, scatter_indices, updates = core.standard_insert_pvary(
+  operand, scatter_indices, updates = core.auto_insert_reshard(
       operand, scatter_indices, updates)
   return scatter_mul_p.bind(
       operand, scatter_indices, updates, update_jaxpr=jaxpr,
@@ -712,7 +712,7 @@ def scatter_min(
   """
   jaxpr, consts = lax._reduction_jaxpr(lax.min,
                                        core.typeof(lax._const(operand, 0)))
-  operand, scatter_indices, updates = core.standard_insert_pvary(
+  operand, scatter_indices, updates = core.auto_insert_reshard(
       operand, scatter_indices, updates)
   return scatter_min_p.bind(
       operand, scatter_indices, updates, update_jaxpr=jaxpr,
@@ -762,7 +762,7 @@ def scatter_max(
   """
   jaxpr, consts = lax._reduction_jaxpr(lax.max,
                                        core.typeof(lax._const(operand, 0)))
-  operand, scatter_indices, updates = core.standard_insert_pvary(
+  operand, scatter_indices, updates = core.auto_insert_reshard(
       operand, scatter_indices, updates)
   return scatter_max_p.bind(
       operand, scatter_indices, updates, update_jaxpr=jaxpr,
@@ -828,7 +828,7 @@ def scatter_apply(
     pass
   jaxpr, consts = lax._reduction_jaxpr(_apply, core.typeof(lax._zero(operand)))
   # TODO: implement this via its own primitive so we can define appropriate autodiff rules.
-  operand, scatter_indices, unused = core.standard_insert_pvary(
+  operand, scatter_indices, unused = core.auto_insert_reshard(
       operand, scatter_indices, unused)
   return scatter_p.bind(
       operand, scatter_indices, unused, update_jaxpr=jaxpr,
@@ -913,7 +913,7 @@ def scatter(
     ...             mode=lax.GatherScatterMode.PROMISE_IN_BOUNDS)
     Array([1., 2., 3., 1., 4.], dtype=float32)
   """
-  operand, scatter_indices, updates = core.standard_insert_pvary(
+  operand, scatter_indices, updates = core.auto_insert_reshard(
       operand, scatter_indices, updates)
   return scatter_p.bind(
       operand, scatter_indices, updates, update_jaxpr=None,
@@ -1141,6 +1141,7 @@ def dynamic_slice_in_dim(operand: Array | np.ndarray,
                        allow_negative_indices=allow_negative)
 
 
+@api.jit(static_argnames=["axis", "keepdims", "allow_negative_indices"])
 def dynamic_index_in_dim(operand: Array | np.ndarray,
                          index: ArrayLike,
                          axis: int = 0, keepdims: bool = True,
@@ -1271,6 +1272,7 @@ def dynamic_update_slice_in_dim(operand: Array | np.ndarray,
                               allow_negative_indices=allow_negative)
 
 
+@api.jit(static_argnames=["axis", "allow_negative_indices"])
 def dynamic_update_index_in_dim(operand: Array | np.ndarray,
                                 update: ArrayLike, index: ArrayLike,
                                 axis: int, *,
@@ -2345,7 +2347,7 @@ def _gather_lower(ctx, operand, indices, *,
     # return hlo.DynamicGatherOp(
     #     operand, indices, mlir.shape_tensor(slice_sizes),
     #     dnums, indices_are_sorted=ir.BoolAttr.get(indices_are_sorted)).results
-    results = mlir.flatten_ir_types(mlir.aval_to_ir_types(aval_out))
+    results = mlir.flatten_ir_types(mlir.aval_to_ir_types(ctx.module_context, aval_out))
     operands = [operand, indices, slice_sizes]
     attributes: dict[str, ir.Attribute] = {
         "dimension_numbers": dnums,
@@ -3303,13 +3305,13 @@ def _scatter_lower(ctx: mlir.LoweringRuleContext, operand, indices, updates, *,
       scattered_dims_to_operand_dims=list(dnums.scatter_dims_to_operand_dims),
       index_vector_dim=len(avals_in[1].shape) - 1,
   )
-  result = mlir.aval_to_ir_type(aval_out)
+  result = mlir.aval_to_ir_type(ctx.module_context, aval_out)
   operand = [operand]
   updates = [updates]
   op = hlo.ScatterOp((result,), operand, indices, updates, scatter_dnums,
                      indices_are_sorted=ir.BoolAttr.get(indices_are_sorted),
                      unique_indices=ir.BoolAttr.get(unique_indices))
-  scalar_type = mlir.aval_to_ir_type(core.ShapedArray((), aval_out.dtype))
+  scalar_type = mlir.aval_to_ir_type(ctx.module_context, core.ShapedArray((), aval_out.dtype))
   update = op.update_computation.blocks.append(scalar_type, scalar_type)
   with ir.InsertionPoint(update):
     name_stack = source_info_util.new_name_stack()
@@ -3365,7 +3367,7 @@ def _scatter_addsub_lower_gpu(
   )
   real_dtype = _real_dtype(aval_out.dtype)
   operand_type_part = mlir.aval_to_ir_type(
-      core.ShapedArray(aval_out.shape, real_dtype))
+      ctx.module_context, core.ShapedArray(aval_out.shape, real_dtype))
 
   def _scatter(operand_part, updates_part):
     operand_part = [operand_part]
@@ -3375,7 +3377,7 @@ def _scatter_addsub_lower_gpu(
         (operand_type_part,), operand_part, indices, updates_part, scatter_dnums,
         indices_are_sorted=ir.BoolAttr.get(indices_are_sorted),
         unique_indices=ir.BoolAttr.get(unique_indices))
-    scalar_type = mlir.aval_to_ir_type(core.ShapedArray((), real_dtype))
+    scalar_type = mlir.aval_to_ir_type(ctx.module_context, core.ShapedArray((), real_dtype))
     reducer = scatter.regions[0].blocks.append(scalar_type, scalar_type)
     with ir.InsertionPoint(reducer):
       hlo.return_([reduce_op(*reducer.arguments).result])

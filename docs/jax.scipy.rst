@@ -57,16 +57,23 @@ jax.scipy.linalg
    cho_factor
    cho_solve
    cholesky
+   circulant
+   companion
    det
+   dft
    eigh
    eigh_tridiagonal
    expm
    expm_frechet
+   fiedler
    funm
+   hadamard
+   helmert
    hessenberg
    hankel
    hilbert
    inv
+   leslie
    lu
    lu_factor
    lu_solve
@@ -162,6 +169,7 @@ jax.scipy.special
    entr
    erf
    erfc
+   erfcx
    erfinv
    exp1
    expi
@@ -191,6 +199,7 @@ jax.scipy.special
    multigammaln
    ndtr
    ndtri
+   owens_t
    poch
    polygamma
    rel_entr

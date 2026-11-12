@@ -287,21 +287,52 @@ class GPUSharedMemory(memory.SharedMemory):
     num_concurrent_threads = (
         num_threads_per_block * num_blocks_per_cluster
     )
+    num_devices = kwargs.pop("num_devices")
 
     num_tma_threads_per_device = kwargs.pop("num_tma_threads_per_device")
     logging_mode = kwargs.pop("logging_mode", None)
 
-    # On each (simulated) GPU device, we currently only ever run a single block
-    # of threads concurrently. Hence, we reserve one vector clock per Pallas
-    # thread (in a block) plus one vector clock per TMA thread (per device).
-    vector_clock_size = kwargs["num_devices"] * (
+    # Entries in each vector clock are organized as follows:
+    #
+    #   0th GPU device: num_concurrent_threads
+    #   1st GPU device: num_concurrent_threads
+    #   ...
+    #   (num_devices - 1)th GPU device: num_concurrent_threads
+    #
+    #   0th GPU device: num_tma_threads_per_device
+    #   1st GPU device: num_tma_threads_per_device
+    #   ...
+    #   (num_devices - 1)th GPU device: num_tma_threads_per_device
+    #
+    # But since TMAs are not simulated by separate (CPU) threads, we only need
+    # vector clocks for the concurrent threads on each GPU device, i.e. we only
+    # allocate a total of
+    #
+    #   num_devices * num_concurrent_threads
+    #
+    # vector clocks.
+    #
+    # To motivate the above layout of entries in the vector clocks (i.e.
+    # concurrent kernel/Pallas threads first, then TMA threads) bear in mind
+    # that we frequently use code patterns like
+    #
+    #   vc.inc_vector_clock(self.clocks[thread_id], thread_id),
+    #
+    # where `thread_id` is the globally, i.e. across devices, unique ID of a
+    # concurrent kernel/Pallas thread, but *not* the ID of a TMA thread. (This
+    # pattern is used, in particular, in the `SharedMemory` class that the
+    # present class is derived from, and that was initially designed for
+    # simulating TPU kernels.)
+    vector_clock_size = num_devices * (
         num_concurrent_threads + num_tma_threads_per_device
     )
+    num_vector_clocks = num_devices * num_concurrent_threads
     clocks = [
         vc.make_vector_clock(vector_clock_size)
-        for _ in range(num_concurrent_threads)
+        for _ in range(num_vector_clocks)
     ]
 
+    kwargs.update(num_devices=num_devices)
     kwargs.update(num_cores_per_device=num_concurrent_threads)
     kwargs.update(vector_clock_size=vector_clock_size)
     kwargs.update(clocks=clocks)
@@ -323,18 +354,17 @@ class GPUSharedMemory(memory.SharedMemory):
     }
 
   @property
-  def num_concurrent_pallas_threads(self) -> int:
+  def num_concurrent_threads(self) -> int:
     return self.num_cores_per_device
 
   @property
   def num_total_threads_per_device(self) -> int:
-    return self.num_concurrent_pallas_threads + self.num_tma_threads_per_device
+    return self.num_concurrent_threads + self.num_tma_threads_per_device
 
   def get_global_thread_id(self, device_id: int, local_thread_id: int) -> int:
     """Computes the global thread ID from the given device and local thread ID."""
-    # We reserve one thread ID per device for the TMA thread.
     return (
-        device_id * self.num_total_threads_per_device
+        device_id * self.num_concurrent_threads
         + local_thread_id
     )
 
@@ -347,12 +377,14 @@ class GPUSharedMemory(memory.SharedMemory):
       self.next_tma_thread_id_per_device[device_id] = (
           next_tma_thread_id + 1
       ) % self.num_tma_threads_per_device
-      return self.num_concurrent_pallas_threads + next_tma_thread_id
+      return self.num_devices * self.num_concurrent_threads + next_tma_thread_id
 
+  # TODO(nrink): Is this method needed? If not, remove it.
   def update_clock(self, vector_clock_idx, clock: vc.VectorClock):
     with self.lock:
       vc.update_vector_clock(self.clocks[vector_clock_idx], clock)
 
+  # TODO(nrink): Is this method needed? If not, remove it.
   def get_clock(self, vector_clock_idx) -> vc.VectorClock | None:
     with self.lock:
       return vc.copy_vector_clock(self.clocks[vector_clock_idx])

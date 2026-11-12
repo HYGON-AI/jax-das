@@ -140,10 +140,6 @@ def get_compile_options(
     num_replicas: int,
     num_partitions: int,
     device_assignment=None,
-    use_spmd_partitioning: bool = True,
-    use_auto_spmd_partitioning: bool = False,
-    auto_spmd_partitioning_mesh_shape: list[int] | None = None,
-    auto_spmd_partitioning_mesh_ids: list[int] | None = None,
     env_options_overrides: dict[str, str] | None = None,
     fdo_profile: bytes | None = None,
     detailed_logging: bool = True,
@@ -158,14 +154,6 @@ def get_compile_options(
       of logical replicas to physical devices (default inherited from
       xla_client.CompileOptions). Must be consistent with `num_replicas` and
       `num_partitions`.
-    use_spmd_partitioning: boolean indicating whether to enable SPMD or MPMD
-      partitioning in XLA.
-    use_auto_spmd_partitioning: boolean indicating whether to automatically
-      generate XLA shardings for SPMD partitioner.
-    auto_spmd_partitioning_mesh_shape: device mesh shape used to create
-      auto_spmd_partitioning search space.
-    auto_spmd_partitioning_mesh_ids: device ids used to create
-      auto_spmd_partitioning search space.
     env_options_overrides: dict of additional options parsed by the compiler
     fdo_profile: Optional profile for feedback-directed optimization passed to
       XLA.
@@ -177,14 +165,10 @@ def get_compile_options(
   compile_options.num_replicas = num_replicas
   compile_options.num_partitions = num_partitions
   build_options = compile_options.executable_build_options
-  build_options.use_spmd_partitioning = use_spmd_partitioning
-  build_options.use_auto_spmd_partitioning = use_auto_spmd_partitioning
+  build_options.use_spmd_partitioning = True
   build_options.use_shardy_partitioner = config.use_shardy_partitioner.value
   if fdo_profile is not None:
     build_options.fdo_profile = fdo_profile
-  if use_auto_spmd_partitioning:
-    build_options.auto_spmd_partitioning_mesh_shape = auto_spmd_partitioning_mesh_shape or []
-    build_options.auto_spmd_partitioning_mesh_ids = auto_spmd_partitioning_mesh_ids or []
   if device_assignment is not None:
     logger.debug(
         'get_compile_options: num_replicas=%s num_partitions=%s device_assignment=%s',
@@ -760,13 +744,21 @@ def _compile_and_write_cache(
   return executable
 
 
+def _should_raise_persistent_cache_error(ex: Exception) -> bool:
+  """Returns True if the exception should be raised, False if it should be warned."""
+  return (
+      config.raise_persistent_cache_errors.value or
+      isinstance(ex, compilation_cache.CacheVerificationError)
+  )
+
+
 def _is_executable_in_cache(backend, cache_key) -> bool:
   """Checks if executable is presented in cache on a given key
   """
   try:
     return compilation_cache.is_executable_in_cache(backend, cache_key)
   except Exception as ex:
-    if config.raise_persistent_cache_errors.value:
+    if _should_raise_persistent_cache_error(ex):
       raise
     warnings.warn(
         f"Error reading persistent compilation cache entry for "
@@ -785,7 +777,7 @@ def _cache_read(
     return compilation_cache.get_executable_and_time(
         cache_key, compile_options, backend, executable_devices)
   except Exception as ex:
-    if config.raise_persistent_cache_errors.value:
+    if _should_raise_persistent_cache_error(ex):
       raise
     warnings.warn(
         f"Error reading persistent compilation cache entry for "
@@ -836,7 +828,7 @@ def _cache_write(cache_key: str,
     compilation_cache.put_executable_and_time(
         cache_key, module_name, executable, backend, int(compile_time_secs))
   except Exception as ex:
-    if config.raise_persistent_cache_errors.value:
+    if _should_raise_persistent_cache_error(ex):
       raise
     warnings.warn(
         f"Error writing persistent compilation cache entry for "

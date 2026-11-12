@@ -52,6 +52,7 @@ limitations under the License.
 #include "mlir/IR/Diagnostics.h"
 #include "mlir/IR/Dialect.h"
 #include "mlir/IR/DialectImplementation.h"  // IWYU pragma: keep
+#include "mlir/IR/IRMapping.h"
 #include "mlir/IR/Location.h"
 #include "mlir/IR/MLIRContext.h"
 #include "mlir/IR/Operation.h"
@@ -350,9 +351,36 @@ llvm::LogicalResult AsyncPrefetchOp::verify() {
 }
 
 llvm::LogicalResult AsyncStoreOp::verify() {
+  if (getGmemPeerId() && getIsGlobalBroadcast()) {
+    return emitOpError() << "Both `gmem_peer_id` or `is_global_broadcast` "
+                            "cannot be specified.";
+  }
   return VerifyCommonLoadStoreOp(getOperation(), getDestination().getType(),
                                  "destination", getSource().getType(), "source",
                                  getSliceLengths(), getIndices());
+}
+
+llvm::LogicalResult AsyncStoreSmemOp::verify() {
+  mlir::VectorType value_type = getValueToStore().getType();
+  mlir::MemRefType dest_type = getDestination().getType();
+
+  if (value_type.getShape() != dest_type.getShape()) {
+    return emitOpError(
+        "The `valueToStore` and `destination` must have the same shape.");
+  }
+  if (value_type.getElementType() != dest_type.getElementType()) {
+    return emitOpError(
+        "The `valueToStore` and `destination` must have the same element "
+        "type.");
+  }
+
+  mlir::Attribute smem = mlir::gpu::AddressSpaceAttr::get(
+      getContext(), mlir::gpu::AddressSpace::Workgroup);
+  if (dest_type.getMemorySpace() != smem) {
+    return emitOpError("The `destination` memref must be in SMEM.");
+  }
+
+  return llvm::success();
 }
 
 llvm::LogicalResult TryClusterCancelOp::verify() {
@@ -592,6 +620,7 @@ llvm::LogicalResult CustomPrimitiveOp::verify() {
         "Custom primitive must have a layout for each vector operand.");
   }
 
+  // TODO(bchetioui): Don't require transforms for barrier memrefs.
   if (num_smem_ref_operands != getInTransforms().size()) {
     return emitOpError(
         "Custom primitive must have transforms for each memref operand in "
@@ -1142,6 +1171,80 @@ struct FoldMGPUReinterpretCastOfSliceSMEM
 void ReinterpretCastOp::getCanonicalizationPatterns(
     mlir::RewritePatternSet& patterns, mlir::MLIRContext* context) {
   patterns.add<FoldMGPUReinterpretCastOfSliceSMEM>(context);
+}
+
+namespace {
+
+struct HoistReinterpretCastOutOfWarpMap
+    : public mlir::OpRewritePattern<WarpMapOp> {
+  using OpRewritePattern::OpRewritePattern;
+
+  mlir::LogicalResult matchAndRewrite(
+      WarpMapOp op, mlir::PatternRewriter& rewriter) const override {
+    bool modified = false;
+    mlir::Block& body = op->getRegion(0).getBlocks().front();
+    for (auto [i, operand, body_operand] :
+        llvm::enumerate(op->getOperands(), body.getArguments())) {
+      Type user_type = nullptr;
+      // It is only safe to rewrite the type of the argument if all of its uses
+      // are reinterpret_cast operations producing the same return type.
+      if (body_operand.hasNUsesOrMore(1) &&
+          absl::c_all_of(
+              body_operand.getUsers(), [&user_type](mlir::Operation* user) {
+                if (auto rc_op = llvm::dyn_cast<ReinterpretCastOp>(user)) {
+                  if (!user_type) {
+                    user_type = rc_op.getType();
+                  }
+                  return rc_op.getType() == user_type;
+                }
+                return false;
+              })) {
+        auto rc_op = llvm::cast<ReinterpretCastOp>(*body_operand.user_begin());
+        mlir::IRMapping mapping;
+        mapping.map(rc_op.getOperand(), operand);
+        rewriter.modifyOpInPlace(op, [&]() {
+            op->setOperand(i, rewriter.clone(*rc_op, mapping)->getResult(0));
+            body_operand.setType(user_type);
+          });
+        // Copy the users of the body operand to a vector because we need to
+        // iterate over them twice to avoid invalidating the iterator: once to
+        // replace them with the body operand and once to erase them.
+        std::vector<mlir::Operation*> users_to_erase(
+          body_operand.user_begin(), body_operand.user_end());
+        for (auto user : body_operand.getUsers()) {
+          rewriter.replaceAllUsesWith(llvm::cast<ReinterpretCastOp>(user),
+                                      body_operand);
+        }
+        for (auto user : users_to_erase) {
+          rewriter.eraseOp(user);
+        }
+        modified = true;
+      }
+    }
+    return modified ? mlir::success() : mlir::failure();
+  }
+};
+}  // namespace
+
+void WarpMapOp::getCanonicalizationPatterns(mlir::RewritePatternSet& patterns,
+                                            mlir::MLIRContext* context) {
+  patterns.add<HoistReinterpretCastOutOfWarpMap>(context);
+}
+
+llvm::LogicalResult GetClusterRefOp::inferReturnTypes(
+    mlir::MLIRContext* context, std::optional<mlir::Location> location,
+    mlir::ValueRange operands, mlir::DictionaryAttr attributes,
+    mlir::PropertyRef properties, mlir::RegionRange regions,
+    llvm::SmallVectorImpl<mlir::Type>& inferredReturnTypes) {
+  if (operands.empty()) {
+    return mlir::emitOptionalError(location, "expected non-empty operands");
+  }
+  auto memref_type = mlir::cast<mlir::MemRefType>(operands[0].getType());
+  auto result_type = mlir::MemRefType::get(
+      memref_type.getShape(), memref_type.getElementType(),
+      memref_type.getLayout(), SmemClusterAttr::get(context));
+  inferredReturnTypes.assign({result_type});
+  return mlir::success();
 }
 
 void MosaicGPUDialect::initialize() {

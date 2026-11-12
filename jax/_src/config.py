@@ -26,7 +26,8 @@ import itertools
 import logging
 import os
 import sys
-from typing import Any, Generic, Generator, NoReturn, Optional, Protocol, Type, TypeVar, cast
+from typing import Any, Generic, NoReturn, Optional, Protocol, TypeVar, cast
+from collections.abc import Generator
 
 from jax._src import logging_config
 from jax._src.lib import _jax
@@ -161,8 +162,8 @@ class Config:
     ```
 
     """
-    import absl.flags as absl_FLAGS  # noqa: F401  # pytype: disable=import-error
-    from absl import app, flags as absl_flags  # pytype: disable=import-error
+    import absl.flags as absl_FLAGS  # noqa: F401  # pyrefly: ignore[missing-import]
+    from absl import app, flags as absl_flags  # pyrefly: ignore[missing-import]
 
     self.use_absl = True
     self.absl_flags = absl_flags
@@ -216,7 +217,7 @@ class Config:
       jax_argv = itertools.takewhile(lambda a: a != '--', sys.argv)
       jax_argv = ['', *(a for a in jax_argv if a.startswith('--jax'))]
 
-      import absl.flags  # pytype: disable=import-error
+      import absl.flags  # pyrefly: ignore[missing-import]
       self.config_with_absl()
       absl.flags.FLAGS(jax_argv, known_only=True)
       self.complete_absl_config(absl.flags)
@@ -273,6 +274,10 @@ class State(config_ext.Config[_T]):
     if self._update_global_hook:
       self._update_global_hook(default)
     config_states[name] = self
+
+  @property
+  def name(self):
+    return self._name
 
   def __bool__(self) -> NoReturn:
     raise TypeError(
@@ -566,7 +571,7 @@ def optional_enum_state(
 
 def enum_class_state(
     name: str,
-    enum_class: Type[_ET],
+    enum_class: type[_ET],
     default: _ET,
     help: str,
     *,
@@ -987,17 +992,6 @@ pallas_tpu_interpret_mode_context_manager = config_ext.Config(
     include_in_trace_context=True,
 )
 
-class UserConfig:
-  def __init__(self, default_value):
-    self._obj = config_ext.Config("user_context", default_value, include_in_jit_key=True,
-                                  include_in_trace_context=True)
-
-  @property
-  def value(self):
-    return self._obj.value
-
-  def __call__(self, new_value):
-    return UserContext(self._obj, new_value)
 
 class UserContext:
   __slots__ = ["_config", "_new_value", "_prev_value"]
@@ -1012,6 +1006,27 @@ class UserContext:
   def __exit__(self, exc_type, exc_val, exc_tb):
     self._config.set_local(self._prev_value)
 
+
+class UserConfig:
+  def __init__(self, default_value):
+    self._obj = config_ext.Config(
+        "user_context", default_value, include_in_jit_key=True,
+        include_in_trace_context=True)
+
+  @property
+  def value(self):
+    return self._obj.value
+
+  def get_global(self):
+    return self._obj.get_global()
+
+  def set_global(self, new_value):
+    return self._obj.set_global(new_value)
+
+  def __call__(self, new_value):
+    return UserContext(self._obj, new_value)
+
+
 def make_user_context(default_value=None):
   """Creates a `jax.jit` cache sensitive context.
 
@@ -1019,8 +1034,9 @@ def make_user_context(default_value=None):
   cache won't get a hit and the jitted function will be re-traced, re-lowered
   and re-compiled.
 
-  This function is not thread-safe. Do not call it concurrently with other JAX
-  APIs.
+  Adding new user contexts is not thread-safe. Do not call make_user_context
+  concurrently with other JAX APIs. However, using a user context once it has
+  been constructed is thread-safe.
 
   Example:
 
@@ -1036,8 +1052,7 @@ def make_user_context(default_value=None):
     f(1.)  # tracing cache miss
   ```
   """
-  obj = UserConfig(default_value)
-  return obj
+  return UserConfig(default_value)
 
 
 # TODO(b/214340779): remove flag when XLA:CPU is improved.
@@ -1320,8 +1335,18 @@ use_simplified_jaxpr_constants = bool_state(
     help=('Enable a simplification of the handling of closed-over constants '
           'in Jaxpr. The value `True` enables the new behavior. '
           'This flag will exist only briefly, while we transition '
-          'users. See https://github.com/jax-ml/jax/pull/29679.'
+          'users. See https://docs.jax.dev/en/latest/internals/constants.html.'
           'DO NOT RELY ON THIS FLAG.'),
+    include_in_jit_key=True,
+    include_in_trace_context=True)
+
+embedded_constants_max_bytes = int_state(
+    name='jax_embedded_constants_max_bytes',
+    default=32,
+    help=('Maximum size in bytes of a constant that is allowed to be '
+          'embedded in the lowered HLO. Constants larger than this '
+          'are hoisted as additional arguments to the executable. '
+          'See https://docs.jax.dev/en/latest/internals/constants.html.'),
     include_in_jit_key=True,
     include_in_trace_context=True)
 
@@ -1408,11 +1433,14 @@ hlo_source_file_canonicalization_regex = optional_string_state(
     default=None,
     help=('Used to canonicalize the source_path metadata of HLO instructions '
           'by removing the given regex. If set, re.sub() is called on each '
-          'source_file with the given regex, and all matches are removed. '
-          'This can be used to avoid spurious cache misses when using the '
-          'persistent compilation cache, which includes HLO metadata in the '
-          'cache key.'),
+          'source_file with the given regex, and all matches are removed.'),
     include_in_trace_context=True)
+
+source_url_schema = optional_string_state(
+    name='jax_source_url_schema',
+    default=None,
+    help=('URL format string used to generate links to source files in the HTML'
+          ' jaxpr dumps. Can contain `{file}` and `{line}` placeholders.'))
 
 include_full_tracebacks_in_locations = bool_state(
     name='jax_include_full_tracebacks_in_locations',
@@ -1424,7 +1452,7 @@ include_full_tracebacks_in_locations = bool_state(
 
 traceback_in_locations_limit = int_state(
     name='jax_traceback_in_locations_limit',
-    default=10,
+    default=100,
     help=(
         'Limit the number of frames at the Python traceback frames included in '
         'MLIR locations. If set to the negative value, traceback will not be '
@@ -1688,6 +1716,13 @@ numpy_rank_promotion = enum_state(
     default='allow',
     help=('Control NumPy-style automatic rank promotion broadcasting '
           '("allow", "warn", or "raise").'),
+    include_in_jit_key=True,
+    include_in_trace_context=True)
+
+auto_pcast = bool_state(
+    name='jax_auto_pcast',
+    default=True,  # TODO(yashkatariya): False
+    help=('If True, automatically insert `pvary` to match VMAs on simple ops.'),
     include_in_jit_key=True,
     include_in_trace_context=True)
 
@@ -2194,7 +2229,7 @@ jax_dump_ir_modes = string_flag(
     name="jax_dump_ir_modes",
     default=os.getenv("JAX_DUMP_IR_MODES", "stablehlo"),
     help="Comma-delimited modes in which to dump IR. Can be 'stablehlo' (the "
-         "default), 'jaxpr', or 'eqn_count_pprof' for "
+         "default), 'jaxpr', 'jaxpr_html', or 'eqn_count_pprof' for "
          "jaxpr equation count pprof profile.")
 
 jax_ragged_dot_use_ragged_dot_instruction = bool_state(
@@ -2217,6 +2252,15 @@ jax_ragged_dot_use_gpu_pallas_triton_lowering = bool_state(
     ),
     include_in_jit_key=True,
     include_in_trace_context=True,
+)
+
+pallas_enable_debug_checks = bool_state(
+    "jax_pallas_enable_debug_checks",
+    default=False,
+    help=(
+        "If set, ``pl.debug_check`` calls are checked at runtime. Otherwise,"
+        " they are a noop."
+    ),
 )
 
 jax_pallas_verbose_errors = bool_flag(

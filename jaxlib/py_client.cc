@@ -17,9 +17,7 @@ limitations under the License.
 
 #include <Python.h>
 
-#include <cstddef>
 #include <cstdint>
-#include <exception>
 #include <memory>
 #include <optional>
 #include <string>
@@ -36,8 +34,7 @@ limitations under the License.
 #include "absl/strings/str_cat.h"
 #include "absl/types/span.h"
 #include "llvm/Support/Casting.h"
-#include "mlir-c/IR.h"
-#include "mlir/Bindings/Python/NanobindAdaptors.h"  // IWYU pragma: keep
+#include "mlir/Bindings/Python/IRCore.h"
 #include "mlir/CAPI/IR.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/MLIRContext.h"
@@ -52,7 +49,6 @@ limitations under the License.
 #include "nanobind/stl/unique_ptr.h"  // IWYU pragma: keep
 #include "nanobind/stl/variant.h"  // IWYU pragma: keep
 #include "nanobind/stl/vector.h"  // IWYU pragma: keep
-#include "jaxlib/guard_lib.h"
 #include "jaxlib/nb_class_ptr.h"
 #include "jaxlib/pprof_profile_builder.h"
 #include "jaxlib/py_array.h"
@@ -62,12 +58,10 @@ limitations under the License.
 #include "jaxlib/py_host_callback.h"
 #include "jaxlib/py_memory_space.h"
 #include "jaxlib/py_user_context.h"
-#include "jaxlib/py_values.h"
-#include "jaxlib/python_ref_manager.h"
-#include "jaxlib/sharding.h"
 #include "jaxlib/traceback.h"
 #include "jaxlib/util.h"
 #include "xla/literal.h"
+#include "xla/pjrt/c_api_client/pjrt_c_api_client.h"
 #include "xla/pjrt/exceptions.h"
 #include "xla/pjrt/mlir_to_hlo.h"
 #include "xla/pjrt/pjrt_client.h"
@@ -87,25 +81,24 @@ limitations under the License.
 #include "xla/python/ifrt/host_callback.h"
 #include "xla/python/ifrt/memory.h"
 #include "xla/python/ifrt/program.h"
-#include "xla/python/ifrt/user_context.h"
+#include "xla/python/ifrt/topology.h"
 #include "xla/python/ifrt/user_context_status_util.h"
 #include "xla/python/nb_absl_span.h"  // IWYU pragma: keep
 #include "xla/python/nb_numpy.h"
 #include "xla/python/pjrt_ifrt/pjrt_array.h"
 #include "xla/python/pjrt_ifrt/pjrt_client.h"
-#include "xla/python/pjrt_ifrt/pjrt_executable.h"
 #include "xla/python/pjrt_ifrt/xla_compiler.h"
 #include "xla/python/types.h"
 #include "xla/python/version.h"
 #include "xla/service/platform_util.h"  // IWYU pragma: keep
 #include "xla/service/spmd/shardy/utils.h"  // IWYU pragma: keep
 #include "xla/shape.h"
-#include "xla/status_macros.h"
 #include "xla/tsl/concurrency/ref_count.h"
 #include "xla/tsl/platform/errors.h"
 #include "xla/tsl/platform/status.h"
 #include "xla/tsl/platform/statusor.h"
-#include "xla/util.h"
+
+using ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::PyModule;
 
 namespace ifrt = xla::ifrt;
 namespace nb = nanobind;
@@ -442,10 +435,10 @@ PyClient::CompileAndLoadIfrtProgram(
                                            std::move(fingerprint));
 }
 
-static absl::StatusOr<nb_class_ptr<PyExecutable>>
-CompileWithTopology(nb_class_ptr<PyClient> client, mlir::ModuleOp module,
-                    const xla::ifrt::Topology &topology,
-                    xla::CompileOptions options, ifrt::DeviceListRef devices) {
+static absl::StatusOr<nb_class_ptr<PyExecutable>> CompileWithTopology(
+    nb_class_ptr<PyClient> client, mlir::ModuleOp module,
+    const xla::ifrt::Topology& topology, xla::CompileOptions options,
+    ifrt::DeviceListRef devices) {
   mlir::OwningOpRef<mlir::ModuleOp> clone(module.clone());
   options.allow_in_place_mlir_modification = true;
   ifrt::ExecutableRef ifrt_executable;
@@ -471,10 +464,9 @@ CompileWithTopology(nb_class_ptr<PyClient> client, mlir::ModuleOp module,
   return make_nb_class<PyExecutable>(ifrt_executable);
 }
 
-absl::StatusOr<nb_class_ptr<PyExecutable>>
-PyClient::Compile(nb_class_ptr<PyClient> client, mlir::ModuleOp module,
-                  ifrt::DeviceListRef executable_devices,
-                  xla::CompileOptions options) {
+absl::StatusOr<nb_class_ptr<PyExecutable>> PyClient::Compile(
+    nb_class_ptr<PyClient> client, mlir::ModuleOp module,
+    ifrt::DeviceListRef executable_devices, xla::CompileOptions options) {
   TF_ASSIGN_OR_RETURN(
       auto topology,
       client->ifrt_client()->GetTopologyForDevices(executable_devices));
@@ -482,10 +474,10 @@ PyClient::Compile(nb_class_ptr<PyClient> client, mlir::ModuleOp module,
                              std::move(options), std::move(executable_devices));
 }
 
-absl::StatusOr<nb_class_ptr<PyExecutable>>
-PyClient::Compile(nb_class_ptr<PyClient> client, mlir::ModuleOp module,
-                  std::shared_ptr<xla::ifrt::Topology> topology,
-                  xla::CompileOptions options) {
+absl::StatusOr<nb_class_ptr<PyExecutable>> PyClient::Compile(
+    nb_class_ptr<PyClient> client, mlir::ModuleOp module,
+    std::shared_ptr<xla::ifrt::Topology> topology,
+    xla::CompileOptions options) {
   return CompileWithTopology(std::move(client), module, *topology,
                              std::move(options), ifrt::DeviceListRef());
 }
@@ -812,6 +804,22 @@ PyType_Slot PyClient::slots_[] = {
   py_local_client.def_prop_ro("platform", &PyClient::platform_name)
       .def_prop_ro("_raw_platform", &PyClient::raw_platform_name)
       .def_prop_ro("platform_version", &PyClient::platform_version)
+      .def_prop_ro(
+          "unsafe_client_pointer",
+          [](PyClient& self) -> std::uintptr_t {
+            if (auto* pjrt_comp =
+                    llvm::dyn_cast_or_null<ifrt::PjRtCompatibleClient>(
+                        self.ifrt_client())) {
+              if (auto* pjrt_client = pjrt_comp->pjrt_client()) {
+                if (auto* c_api_client =
+                        dynamic_cast<xla::PjRtCApiClient*>(pjrt_client)) {
+                  return reinterpret_cast<std::uintptr_t>(
+                      c_api_client->pjrt_c_client());
+                }
+              }
+            }
+            return 0;
+          })
       .def_prop_ro("runtime_type", &PyClient::runtime_type)
       .def("device_count", &PyClient::device_count)
       .def("local_device_count", &PyClient::addressable_device_count)
@@ -830,12 +838,12 @@ PyType_Slot PyClient::slots_[] = {
       .def("task_id", &PyClient::process_index)
       .def(
           "compile",
-          [](nb_class_ptr<PyClient> client, MlirModule mlir_module,
+          [](nb_class_ptr<PyClient> client, PyModule& mlir_module,
              PyDeviceList& py_executable_devices, xla::CompileOptions options) {
             ifrt::DeviceListRef executable_devices =
                 xla::ValueOrThrow(py_executable_devices.ifrt_device_list());
             return xla::ValueOrThrow(PyClient::Compile(
-                std::move(client), unwrap(mlir_module),
+                std::move(client), unwrap(mlir_module.get()),
                 std::move(executable_devices), std::move(options)));
           },
           nb::arg("computation"), nb::arg("executable_devices"),
@@ -852,12 +860,12 @@ PyType_Slot PyClient::slots_[] = {
               ))
       .def(
           "compile",
-          [](nb_class_ptr<PyClient> client, MlirModule mlir_module,
+          [](nb_class_ptr<PyClient> client, PyModule& mlir_module,
              std::shared_ptr<xla::ifrt::Topology> topology,
              xla::CompileOptions options) {
-            return xla::ValueOrThrow(PyClient::Compile(
-                std::move(client), unwrap(mlir_module), std::move(topology),
-                std::move(options)));
+            return xla::ValueOrThrow(
+                PyClient::Compile(std::move(client), unwrap(mlir_module.get()),
+                                  std::move(topology), std::move(options)));
           },
           nb::arg("computation"), nb::arg("topology"),
           nb::arg("compile_options") = xla::CompileOptions(),
@@ -873,13 +881,13 @@ PyType_Slot PyClient::slots_[] = {
               ))
       .def(
           "compile_and_load",
-          [](nb_class_ptr<PyClient> client, MlirModule mlir_module,
+          [](nb_class_ptr<PyClient> client, PyModule& mlir_module,
              PyDeviceList& py_executable_devices, xla::CompileOptions options,
              std::vector<nb::capsule> host_callbacks) {
             ifrt::DeviceListRef executable_devices =
                 xla::ValueOrThrow(py_executable_devices.ifrt_device_list());
             return xla::ValueOrThrow(PyClient::CompileAndLoad(
-                std::move(client), unwrap(mlir_module),
+                std::move(client), unwrap(mlir_module.get()),
                 std::move(executable_devices), std::move(options),
                 std::move(host_callbacks)));
           },
@@ -899,13 +907,13 @@ PyType_Slot PyClient::slots_[] = {
               ))
       .def(
           "compile_and_load",
-          [](nb_class_ptr<PyClient> client, MlirModule mlir_module,
+          [](nb_class_ptr<PyClient> client, PyModule& mlir_module,
              PyDeviceList& py_executable_devices, xla::CompileOptions options,
              std::vector<nb::callable> host_callbacks) {
             ifrt::DeviceListRef executable_devices =
                 xla::ValueOrThrow(py_executable_devices.ifrt_device_list());
             return xla::ValueOrThrow(PyClient::CompileAndLoad(
-                std::move(client), unwrap(mlir_module),
+                std::move(client), unwrap(mlir_module.get()),
                 std::move(executable_devices), std::move(options),
                 std::move(host_callbacks)));
           },

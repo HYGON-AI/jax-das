@@ -455,6 +455,12 @@ def MosaicGPU_AsyncStoreOp : Op<MosaicGPU_Dialect, "async_store",
     The `reduction_op` attribute can be provided to perform a reduction when
     storing to GMEM. For example, using `add` will add the SMEM values to
     existing values in GMEM.
+
+    The `gmem_peer_id` and `is_global_broadcast` parameters define the
+    destination of the store in a multi-GPU setting. `gmem_peer_id` specifies a
+    particular device id to store to, while `is_global_broadcast` indicates
+    that the value should be broadcast to all peers. These two parameters are
+    mutually exclusive (i.e. both cannot be set).
   }];
 
   let arguments = (ins
@@ -462,11 +468,13 @@ def MosaicGPU_AsyncStoreOp : Op<MosaicGPU_Dialect, "async_store",
     AnyMemRef:$destination,
     Variadic<AnyTypeOf<[I32, VectorOfRankAndType<[1], [I32, I16, I8]>]>>:$indices,
     PtxPredicate:$predicate,
+    Optional<I32>:$gmem_peer_id,
 
     // Attributes
     DenseI64ArrayAttr:$slice_lengths,
     DefaultValuedOptionalAttr<BoolAttr, "true">:$commit_group,
-    OptionalAttr<MosaicGPU_TMAReduction>:$reduction_op
+    OptionalAttr<MosaicGPU_TMAReduction>:$reduction_op,
+    DefaultValuedAttr<BoolAttr, "false">:$is_global_broadcast
   );
 
   let hasVerifier = 1;
@@ -569,6 +577,32 @@ def MosaicGPU_VectorStoreOp : Op<MosaicGPU_Dialect, "vector_store",
     OptionalAttr<BoolAttr>:$optimized,
     OptionalAttr<MosaicGPU_AtomicOpType>:$atomic_type,
     DefaultValuedAttr<BoolAttr, "false">:$multimem
+  );
+
+  let hasVerifier = 1;
+}
+
+def MosaicGPU_AsyncStoreSmemOp : Op<MosaicGPU_Dialect, "async_store_smem",
+      [MemoryEffects<[MemWrite]>]> {
+  let summary = "Issues an async store of a vector from registers to SMEM of a block in a cluster";
+  let description = [{
+    `cluster_dim` and `cluster_idx` specify the target block.
+
+    The target block can wait on the provided barrier (its local copy) to
+    observe the completion of this copy.
+
+    When `atomic` is specified, the store performs an atomic reduction on target
+    SMEM instead of overwriting it.
+  }];
+
+  let arguments = (ins
+    AnyFixedVectorOfNonZeroRank:$valueToStore,
+    AnyNon0RankedMemRef:$destination,
+    MemRefRankOf<[MosaicGPU_Barrier], [0]>:$barrier,
+    MosaicGPU_Dimension:$cluster_dim,
+    I32:$cluster_idx,
+    OptionalAttr<MosaicGPU_AtomicOpType>:$atomic_type,
+    OptionalAttr<BoolAttr>:$optimized
   );
 
   let hasVerifier = 1;
@@ -739,6 +773,10 @@ def MosaicGPU_TmemAttr : MosaicGPU_Attr<"Tmem", "tmem"> {
   let summary = "Tensor memory space.";
 }
 
+def MosaicGPU_SmemClusterAttr : MosaicGPU_Attr<"SmemCluster", "smem_cluster"> {
+  let summary = "Cluster shared memory space.";
+}
+
 def MosaicGPU_TcGen05MMASupportedABType : AnyTypeOf<[F16, F32, BF16, TF32, F8E4M3FN, F8E5M2, F6E2M3FN, F6E3M2FN, F4E2M1FN, I8],
     "A type supported by the `a` and `b` operands of the `tcgen05.mma` instruction">;
 
@@ -858,6 +896,8 @@ def MosaicGPU_WarpMapOp : Op<MosaicGPU_Dialect, "warp_map",
   let summary = "Evaluates a block in parallel on all warps.";
   let arguments = (ins Variadic<AnyType>:$operands);
   let regions = (region SizedRegion<1>:$region);
+
+  let hasCanonicalizer = 1;
   let hasVerifier = 1;
 }
 
@@ -1114,6 +1154,22 @@ def MosaicGPU_BroadcastedIotaOp : Op<MosaicGPU_Dialect, "broadcasted_iota", []> 
   let results = (outs AnyFixedVectorOfNonZeroRank);
 
   let hasVerifier = 1;
+}
+
+def MosaicGPU_GetClusterRefOp : Op<MosaicGPU_Dialect, "get_cluster_ref", [Pure, AttrSizedOperandSegments, DeclareOpInterfaceMethods<InferTypeOpInterface>]> {
+  let summary = "Maps a memref to a peer block in the cluster.";
+  let description = [{
+    Maps a memref to a peer block in the cluster along specified dimensions.
+  }];
+
+  let arguments = (ins
+    AnyMemRef:$source,
+    Optional<I32>:$x,
+    Optional<I32>:$y,
+    Optional<I32>:$z
+  );
+
+  let results = (outs AnyMemRef:$result);
 }
 
 #endif // THIRD_PARTY_PY_JAX_JAXLIB_MOSAIC_DIALECT_GPU_MOSAIC_GPU_TD_

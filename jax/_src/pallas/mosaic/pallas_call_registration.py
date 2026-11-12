@@ -18,62 +18,42 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 import dataclasses
-import functools
 import json
-from typing import Any, cast
+from typing import cast
 
 import jax
-from jax import dtypes
 from jax._src import core as jax_core
+from jax._src import dtypes
 from jax._src import frozen_dict
+from jax._src import linear_util as lu
 from jax._src import sharding_impls
+from jax._src import state
 from jax._src import tpu_custom_call
 from jax._src.interpreters import mlir
+from jax._src.interpreters import partial_eval as pe
 from jax._src.lib.mlir import ir
 from jax._src.lib.mlir import passmanager
 from jax._src.pallas import core as pallas_core
+from jax._src.pallas import mpmd
 from jax._src.pallas.mosaic import core as tpu_core
+from jax._src.pallas.mosaic import helpers
 from jax._src.pallas.mosaic import lowering
 from jax._src.pallas.mosaic import sc_core
-from jax._src.pallas.mosaic import sc_lowering
+from jax._src.pallas.mosaic import sc_lowering  # noqa: F401
 from jax._src.pallas.mosaic import tpu_info
 from jax._src.state import types as state_types
 from jax.experimental import mosaic
 from jax.experimental.mosaic.dialects import tpu
 
 
-def _maybe_cast_to_int(x: jax.Array | jax_core.AbstractValue):
-  """Casts boolean values to integers.
-
-  We perform this cast because Mosaic does not directly support bool values
-  for Memrefs. Instead, we load bools as integers and cast them to bools
-  after loading from a memref inside of the kernel.
-  """
-  assert isinstance(
-      x, (jax.Array, jax_core.ShapedArray, state_types.AbstractLinVal)
-  ) or (
-      isinstance(x, jax_core.Tracer)
-      and isinstance(x.aval, state_types.AbstractLinVal)
-  ), type(x)
-  if isinstance(x, jax.Array):
-    if dtypes.issubdtype(x.dtype, jax.numpy.bool_):
-      return x.astype(lowering.BOOL_MEMREF_TYPE)
-    return x
-  else:
-    if dtypes.issubdtype(x.dtype, jax.numpy.bool_):
-      if isinstance(x, state_types.AbstractLinVal):
-        raise NotImplementedError  # TODO(mattjj,sharadmv)
-      return jax_core.ShapedArray(x.shape, lowering.BOOL_MEMREF_TYPE)
-    return x
-
-
 def _get_memory_space_from_aval(
-    out_aval: jax_core.AbstractValue, kernel_type: tpu_core.CoreType
+    out_aval: jax_core.AbstractValue, kernel_type: tpu_core.CoreType | None
 ) -> tpu_custom_call.MemorySpace | None:
   if not isinstance(out_aval, jax_core.ShapedArray):
     raise ValueError("Memory spaces not defined for non-ShapedArrays")
   if not isinstance(
-      ms := getattr(out_aval, "memory_space", None), tpu_core.MemorySpace
+      ms := getattr(out_aval, "memory_space", None),
+      (tpu_core.MemorySpace, pallas_core.CoreMemorySpace),
   ):
     return None  # If we are passed a non-TPU memory space, ignore it.
   # If we are passed an aval with an explicit memory space tag, we use it
@@ -95,13 +75,30 @@ def _get_memory_space_from_aval(
           raise ValueError(f"Invalid kernel type for semaphore: {kernel_type}")
     case tpu_core.MemorySpace.HOST:
       return tpu_custom_call.MemorySpace.HOST
+    case pallas_core.CoreMemorySpace(tpu_core.MemorySpace.VMEM, mesh):
+      match mesh.core_type:
+        case tpu_core.CoreType.TC:
+          return tpu_custom_call.MemorySpace.VMEM
+        case _:
+          raise ValueError(f"Invalid core type for VMEM: {mesh.core_type}")
+    case pallas_core.CoreMemorySpace(tpu_core.MemorySpace.SEMAPHORE, mesh):
+      match mesh.core_type:
+        case tpu_core.CoreType.SC_SCALAR_SUBCORE:
+          return tpu_custom_call.MemorySpace.SC_SCALAR_SEMAPHORE_MEM
+        case tpu_core.CoreType.TC:
+          return tpu_custom_call.MemorySpace.SEMAPHORE_MEM
+        case _:
+          raise ValueError(
+              f"Invalid core type for semaphore: {mesh.core_type}"
+          )
     case _:
       pass
   return None
 
 
 def _get_memory_spaces_from_avals(
-    avals: Sequence[jax_core.AbstractValue], kernel_type: tpu_core.CoreType
+    avals: Sequence[jax_core.AbstractValue],
+    kernel_type: tpu_core.CoreType | None,
 ) -> tuple[tpu_custom_call.MemorySpace | None, ...] | None:
   memory_spaces = None
   if any(isinstance(aval, jax_core.ShapedArray)
@@ -118,7 +115,7 @@ def _resolve_memory_spaces(
     out_avals: Sequence[jax_core.AbstractValue],
     *,
     input_output_aliases: tuple[tuple[int, int], ...],
-    kernel_type: tpu_core.CoreType,
+    kernel_type: tpu_core.CoreType | None,
 ) -> tuple[
     tuple[tpu_custom_call.MemorySpace | None, ...] | None,
     tuple[tpu_custom_call.MemorySpace | None, ...] | None,
@@ -205,10 +202,11 @@ def _resolve_side_effect_type(
 
 def _resolve_tiling(
     mosaic_params: tpu_core.CompilerParams,
+    kernel_type: tpu_core.CoreType | None,
 ) -> tpu_custom_call.Tiling | None:
   if mosaic_params.use_tc_tiling_on_sc is None:
     return None
-  if mosaic_params.kernel_type is tpu_core.CoreType.TC:
+  if kernel_type is tpu_core.CoreType.TC:
     raise ValueError(
         "use_tc_tiling_on_sc= is not supported for TC kernels"
     )
@@ -220,11 +218,34 @@ def _resolve_tiling(
   )
 
 
+def _jaxpr_kernel_aval_to_mosaic(
+    aval: jax_core.AbstractValue,
+) -> jax_core.AbstractValue:
+  match aval:
+    case state_types.AbstractLinVal():
+      if dtypes.issubdtype(aval.dtype, jax.numpy.bool_):
+        raise NotImplementedError  # TODO(mattjj,sharadmv)
+      return aval
+    case jax_core.ShapedArray():
+      if dtypes.issubdtype(aval.dtype, jax.numpy.bool_):
+        return aval.update(dtype=lowering.BOOL_MEMREF_TYPE)
+      return aval
+    case _:
+      raise ValueError(f"Unsupported JAX aval type: {type(aval)}")
+
+
+def _jax_value_to_mosaic_value(x: jax.Array) -> jax.Array:
+  if dtypes.issubdtype(x.dtype, dtypes.bool_):
+    return x.astype(lowering.BOOL_MEMREF_TYPE)
+  return x
+
+
 def _lower_to_custom_call(
     ctx: mlir.LoweringRuleContext,
     *in_nodes,
     mosaic_module: ir.Module,
     mosaic_params: tpu_core.CompilerParams,
+    kernel_type: tpu_core.CoreType | None,
     num_dynamic_grid_bounds: int,
     input_output_aliases: tuple[tuple[int, int], ...],
     cost_estimate: pallas_core.CostEstimate | None,
@@ -234,7 +255,6 @@ def _lower_to_custom_call(
     name: str,
     jax_mesh,
 ):
-  kernel_type = mosaic_params.kernel_type
   input_output_aliases = tuple(
       (a[0] + num_dynamic_grid_bounds, a[1]) for a in input_output_aliases
   )
@@ -247,11 +267,11 @@ def _lower_to_custom_call(
 
   # Booleans are loaded into the kernel as integers.
   def _maybe_cast_inputs(*args):
-    args = [_maybe_cast_to_int(x) for x in args]
+    args = [_jax_value_to_mosaic_value(x) for x in args]
     return args
 
-  kernel_in_avals = [_maybe_cast_to_int(x) for x in ctx.avals_in]
-  kernel_out_avals = [_maybe_cast_to_int(x) for x in ctx.avals_out]
+  kernel_in_avals = [_jaxpr_kernel_aval_to_mosaic(x) for x in ctx.avals_in]
+  kernel_out_avals = [_jaxpr_kernel_aval_to_mosaic(x) for x in ctx.avals_out]
   cast_ctx = ctx.replace(avals_out=kernel_in_avals)
   in_nodes = mlir.lower_fun(_maybe_cast_inputs)(cast_ctx, *in_nodes)
 
@@ -319,7 +339,8 @@ def _lower_to_custom_call(
       skip_device_barrier=mosaic_params.skip_device_barrier,
       allow_collective_id_without_custom_barrier=mosaic_params.allow_collective_id_without_custom_barrier,
       shape_invariant_numerics=mosaic_params.shape_invariant_numerics,
-      tiling=_resolve_tiling(mosaic_params),
+      needs_layout_passes=mosaic_params.needs_layout_passes,
+      tiling=_resolve_tiling(mosaic_params, kernel_type),
   )
   _maybe_cast_to_bool = (
       lambda x, aval: x.astype(jax.numpy.bool_)
@@ -364,33 +385,6 @@ def pallas_call_tpu_lowering_rule(
     assert isinstance(compiler_params, tpu_core.CompilerParams)
     mosaic_params = compiler_params
 
-  kernel_type = mosaic_params.kernel_type
-
-  # `mesh` argument is the core mesh if provided by the user (e.g. in core_map).
-  # If it's None, we create a default mesh based on the kernel type.
-  # TODO(rdyro): Remove once we have a way of explicitly passing a mesh here.
-  if mesh is None:
-    if kernel_type == tpu_core.CoreType.TC:
-      # TODO(rdyro): In cross-compilation, TPU info might not be available.
-      # Remove this once we always have an explicit mesh.
-      try:
-        num_cores = tpu_info.get_tpu_info().num_cores
-      except ValueError:
-        num_cores = 1
-      mesh = tpu_core.create_tensorcore_mesh(
-          axis_name="tensorcore_unnamed_core", num_cores=num_cores
-      )
-    elif kernel_type == tpu_core.CoreType.SC_SCALAR_SUBCORE:
-      mesh = sc_core.ScalarSubcoreMesh(axis_name="sparsecore_unnamed_core")
-    elif kernel_type == tpu_core.CoreType.SC_VECTOR_SUBCORE:
-      mesh = sc_core.VectorSubcoreMesh(
-          core_axis_name="sparsecore_unnamed_core",
-          subcore_axis_name="sparsecore_unnamed_subcore",
-      )
-    else:
-      raise ValueError(f"Unsupported kernel type: {kernel_type}")
-  mpmd_meshes = {kernel_type: mesh}
-
   jax_mesh = None
   axis_context = ctx.module_context.axis_context
   if axis_context is not None:
@@ -401,30 +395,16 @@ def pallas_call_tpu_lowering_rule(
   mlir_ctx.load_all_available_dialects()
   tpu.register_dialect(mlir_ctx)
 
-  match kernel_type:
-    case tpu_core.CoreType.TC:
-      lower_jaxpr_to_module = lowering.lower_jaxpr_to_module
-    case (
-        tpu_core.CoreType.SC_SCALAR_SUBCORE
-        | tpu_core.CoreType.SC_VECTOR_SUBCORE
-    ):
-      lower_jaxpr_to_module = functools.partial(
-          sc_lowering.lower_pipelined_jaxpr_to_module,
-          use_tc_tiling=mosaic_params.use_tc_tiling_on_sc,
-      )
-    case _:
-      raise ValueError(f"Unsupported kernel type: {mosaic_params.kernel_type}")
-
   with mlir_ctx, ir.Location.unknown(mlir_ctx):
-    mosaic_module = lower_jaxpr_to_module(
+    mosaic_module = lowering.lower_jaxpr_to_pipelined_module(
         ctx,
         grid_mapping,
         jaxpr,
         dimension_semantics=mosaic_params.dimension_semantics,
-        kernel_type=kernel_type,
+        kernel_type=tpu_core.CoreType.TC,
         mesh=jax_mesh,
         dynamic_shape_replacement_enabled=pallas_core.dynamic_shapes_export_enabled(),
-        mpmd_meshes=mpmd_meshes,
+        fuse_transposed_lhs_in_matmul=mosaic_params.fuse_transposed_lhs_in_matmul,
     )
 
   if debug:
@@ -438,6 +418,7 @@ def pallas_call_tpu_lowering_rule(
       *in_nodes,
       mosaic_module=mosaic_module,
       mosaic_params=mosaic_params,
+      kernel_type=tpu_core.CoreType.TC,
       num_dynamic_grid_bounds=grid_mapping.num_dynamic_grid_bounds,
       input_output_aliases=input_output_aliases,
       cost_estimate=cost_estimate,
@@ -449,12 +430,112 @@ def pallas_call_tpu_lowering_rule(
   )
 
 
+def _rewrite_jaxpr_for_lowering(
+    jaxpr: jax_core.Jaxpr,
+    mesh: pallas_core.Mesh,
+    all_meshes: tuple[pallas_core.Mesh, ...],
+) -> jax_core.Jaxpr:
+  # If the jaxpr has any scalar shaped arrays as inputs, they must have come
+  # from closed over scalars. We need to rewrite the jaxpr to actually take in
+  # a (1,) shaped Ref as an input. On TC and SC Vector Subcore, this Ref will be
+  # in SMEM and on the SC scalar subcore, it will be in SMEM.
+  core_type = mesh.core_type
+  is_scalar_input = [
+      isinstance(v.aval, jax_core.ShapedArray) and not v.aval.shape
+      for v in jaxpr.invars
+  ]
+  if not any(is_scalar_input):
+    return jaxpr
+
+  new_in_avals = []
+  for is_scalar, v in zip(is_scalar_input, jaxpr.invars):
+    if not is_scalar:
+      new_in_avals.append(v.aval)
+      continue
+    if core_type == tpu_core.CoreType.TC:
+      # TC compiler supports passing Refs in SMEM directly.
+      mem_space = tpu_core.MemorySpace.SMEM
+    elif core_type in (
+        tpu_core.CoreType.SC_SCALAR_SUBCORE,
+        tpu_core.CoreType.SC_VECTOR_SUBCORE,
+    ):
+      # SC compiler doesn't support pass-via-SMEM so we need to pass the Refs
+      # in HBM and then copy them into SMEM inside the kernel.
+      mem_space = tpu_core.MemorySpace.HBM
+    else:
+      raise ValueError(f"Unsupported core type: {core_type}")
+    new_in_avals.append(
+        state.AbstractRef(
+            jax_core.ShapedArray((1,), v.aval.dtype), memory_space=mem_space  # pyrefly: ignore[missing-attribute]
+        )
+    )
+
+  def new_body(*args):
+    sync_copy_srcs = []
+    sync_copy_dsts = []
+    refs = []
+    # First pass: collect the destinations and sources for all scalar inputs
+    # so we can perform a single, grouped sync_copy for performance.
+    for is_scalar, arg in zip(is_scalar_input, args):
+      if not is_scalar:
+        refs.append(None)
+        continue
+      if core_type == tpu_core.CoreType.TC:
+        refs.append(arg)
+      elif core_type == tpu_core.CoreType.SC_SCALAR_SUBCORE:
+        smem_ref = jax.empty_ref(
+            jax_core.ShapedArray((1,), arg.dtype),
+            memory_space=tpu_core.MemorySpace.SMEM,
+        )
+        sync_copy_srcs.append(arg)
+        sync_copy_dsts.append(smem_ref)
+        refs.append(smem_ref)
+      elif core_type == tpu_core.CoreType.SC_VECTOR_SUBCORE:
+        num_lanes = sc_core.get_sparse_core_info().num_lanes
+        vmem_ref = jax.empty_ref(
+            jax_core.ShapedArray((num_lanes,), arg.dtype),
+            memory_space=tpu_core.MemorySpace.VMEM,
+        )
+        sync_copy_srcs.append(arg)
+        sync_copy_dsts.append(vmem_ref.at[:1])
+        refs.append(vmem_ref)
+
+    # Perform bulk sync_copy for all scalars before any reads are emitted.
+    if sync_copy_srcs:
+      helpers.sync_copy(tuple(sync_copy_srcs), tuple(sync_copy_dsts))
+
+    processed_args = []
+    # Second pass: load values from the populated SMEM/VMEM references.
+    # Doing this in a second pass ensures the read operations appear after
+    # the sync_copy operation in the traced jaxpr.
+    for is_scalar, arg, ref in zip(is_scalar_input, args, refs):
+      if is_scalar:
+        assert ref is not None
+        if core_type == tpu_core.CoreType.SC_VECTOR_SUBCORE:
+          processed_args.append(ref[...][0])
+        else:
+          processed_args.append(ref[0])
+      else:
+        processed_args.append(arg)
+
+    return jax_core.eval_jaxpr(jaxpr, jaxpr.constvars, *processed_args)
+
+  with mpmd.mpmd_map_tracing_context(mesh, all_meshes):
+    new_jaxpr, _, new_consts = pe.trace_to_jaxpr_dynamic(
+        lu.wrap_init(
+            new_body, debug_info=jaxpr.debug_info.with_unknown_names()
+        ),
+        new_in_avals,
+    )
+  assert not new_consts
+  return new_jaxpr
+
+
 def mpmd_map_tpu_lowering_rule(
     ctx: mlir.LoweringRuleContext,
     *in_nodes,
     meshes,
     jaxprs,
-    grid_mappings,
     out_avals,
     input_output_aliases,
     compiler_params,
@@ -463,6 +544,8 @@ def mpmd_map_tpu_lowering_rule(
     cost_estimate,
     metadata,
     name,
+    external_meshes,
+    num_scratch,
 ):
   del interpret  # Unused.
 
@@ -486,7 +569,9 @@ def mpmd_map_tpu_lowering_rule(
         "mpmd_map does not support dimension_semantics= in compiler_params="
     )
 
-  mpmd_meshes_map = {mesh.kernel_type: mesh for mesh in meshes}
+  mpmd_meshes_map = {
+      mesh.core_type: mesh for mesh in [*meshes, *external_meshes]
+  }
   jax_mesh = None
   axis_context = ctx.module_context.axis_context
   if axis_context is not None:
@@ -497,48 +582,65 @@ def mpmd_map_tpu_lowering_rule(
   mlir_ctx.load_all_available_dialects()
   tpu.register_dialect(mlir_ctx)
 
+  some_jaxpr = jaxprs[0]
+  is_scalar_input = [
+      isinstance(v.aval, jax_core.ShapedArray) and not v.aval.shape
+      for v in some_jaxpr.invars
+  ]
+
   with mlir_ctx, ir.Location.unknown(mlir_ctx):
     mosaic_module = ir.Module.create()
-    for mesh, jaxpr, grid_mapping in zip(
-        meshes, jaxprs, grid_mappings, strict=True
-    ):
-      if (
-          not hasattr(mesh, "kernel_type") or
-          not hasattr(mesh, "dimension_semantics")
+    for mesh, jaxpr in zip(meshes, jaxprs, strict=True):
+      if not hasattr(mesh, "core_type") or not hasattr(
+          mesh, "dimension_semantics"
       ):
         raise ValueError(
-            "mpmd_map requires the mesh to define its ``kernel_type`` and"
+            "mpmd_map requires the mesh to define its ``core_type`` and"
             " ``dimension_semantics``"
         )
 
-      match kernel_type := mesh.kernel_type:
+      match kernel_type := mesh.core_type:
         case tpu_core.CoreType.TC:
-          if (mpmd_meshes_map is not None
-              and mpmd_meshes_map.keys() != {tpu_core.CoreType.TC}):
+          if mpmd_meshes_map is not None and mpmd_meshes_map.keys() != {
+              tpu_core.CoreType.TC
+          }:
             raise NotImplementedError(
-                "mpmd_map does not support TC kernels yet.")
-          lower_fn = lowering.lower_jaxpr_into_module
+                "mpmd_map does not support TC kernels yet."
+            )
         case (
             tpu_core.CoreType.SC_SCALAR_SUBCORE
             | tpu_core.CoreType.SC_VECTOR_SUBCORE
         ):
-          lower_fn = sc_lowering.lower_jaxpr_into_module
+          if not tpu_info.is_tpu_device():
+            raise ValueError(
+                "SparseCore kernels are only supported on TPU, but the current"
+                f" device is {tpu_info.get_device_kind()}."
+            )
+          info = tpu_info.get_tpu_info()
+          if not info.sparse_core:
+            raise ValueError(
+                "SparseCore is not available on the current device"
+                f" ({info.chip_version}), but the kernel type is set to"
+                " SparseCore."
+            )
         case _:
-          raise ValueError(
-              f"Unsupported kernel type: {kernel_type}"
-          )
+          raise ValueError(f"Unsupported kernel type: {kernel_type}")
 
-      lower_fn(
+      if any(is_scalar_input):
+        jaxpr = _rewrite_jaxpr_for_lowering(
+            jaxpr, mesh, (*meshes, *external_meshes)
+        )
+
+      lowering.lower_jaxpr_into_unpipelined_module(
           ctx,
           mosaic_module,
-          grid_mapping,
           jaxpr,
-          dimension_semantics=mesh.dimension_semantics,
-          kernel_type=kernel_type,
-          mesh=jax_mesh,
+          jax_mesh=jax_mesh,
+          pallas_mesh=mesh,
           name=mlir.sanitize_name(jaxpr.debug_info.func_name),
           dynamic_shape_replacement_enabled=pallas_core.dynamic_shapes_export_enabled(),
-          mpmd_meshes=mpmd_meshes_map,
+          num_scratch=num_scratch,
+          needs_layout_passes=mosaic_params.needs_layout_passes,
       )
 
   if debug:
@@ -550,24 +652,44 @@ def mpmd_map_tpu_lowering_rule(
   if name is None:
     name = "_".join(jaxpr.debug_info.func_name for jaxpr in jaxprs)
 
-  match [*{mesh.kernel_type for mesh in meshes}]:
+  match [*{mesh.core_type for mesh in meshes}]:
     case [kernel_type]:
-      mosaic_params = dataclasses.replace(
-          mosaic_params, kernel_type=kernel_type
-      )
+      pass
     case _:
       # Use a stub ``kernel_type`` if we are lowering multiple kernels.
       # This will hopefully cause a runtime error if ``kernel_type`` is ever
       # accessed.
-      mosaic_params = dataclasses.replace(
-          mosaic_params, kernel_type=cast(Any, object())
-      )
+      kernel_type = None
+
+  def _maybe_expand_scalar_input(is_scalar, in_node, aval):
+    expand_ctx = ctx.replace(
+        avals_in=[aval],
+        avals_out=[aval.update(shape=(1,))]
+    )
+    if is_scalar:
+      return mlir.lower_fun(lambda x: x[None], multiple_results=False)(
+          expand_ctx, in_node
+      )[0]
+    return in_node
+  in_nodes = [
+      _maybe_expand_scalar_input(is_scalar, in_node, aval)
+      for is_scalar, in_node, aval in zip(is_scalar_input, in_nodes, ctx.avals_in)
+  ]
+  ctx = ctx.replace(
+      avals_in=[
+          aval.update(shape=(1,))
+          if is_scalar
+          else aval
+          for is_scalar, aval in zip(is_scalar_input, ctx.avals_in)
+      ]
+  )
 
   return _lower_to_custom_call(
       ctx,
       *in_nodes,
       mosaic_module=mosaic_module,
       mosaic_params=mosaic_params,
+      kernel_type=kernel_type,
       num_dynamic_grid_bounds=0,
       input_output_aliases=tuple(input_output_aliases.items()),
       cost_estimate=cost_estimate,

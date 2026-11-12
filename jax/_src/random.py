@@ -65,6 +65,25 @@ UINT_DTYPES = prng.UINT_DTYPES
 
 ### utilities
 
+def _check_broadcast_shapes(name: str, shape: tuple | Shape | None, *args: ArrayLike):
+  arg_shapes = [np.shape(a) for a in args]
+  if shape is None:
+    if arg_shapes:
+      shape = lax.broadcast_shapes(*arg_shapes)
+    else:
+      shape = ()
+  else:
+    shape = core.canonicalize_shape(shape)
+    _check_shape(name, shape, *arg_shapes)
+  return shape
+
+
+def _check_all_safe_to_cast(name: str, dtype: DTypeLike, *args):
+  for arg in args:
+    if not dtypes.safe_to_cast(arg, dtype):
+      raise dtypes.TypePromotionError(f"In arguments to {name}, cannot safely cast argument of type {jnp.asarray(arg).dtype} to {dtype}")
+
+
 def _isnan(x: ArrayLike) -> Array:
   return lax.ne(x, x)
 
@@ -162,9 +181,12 @@ class PRNGSpec:
 # TODO(frostig,vanderplas): remove PRNGImpl from this union when it's
 # no longer in the public API because `default_prng_impl` is gone
 PRNGSpecDesc = Union[str, PRNGSpec, PRNGImpl, Hashable]
+KeyDTypeLike = Union[str, prng.KeyTy]
 
 
-def resolve_prng_impl(impl_spec: PRNGSpecDesc | None) -> PRNGImpl:
+def resolve_prng_impl(
+    impl_spec: PRNGSpecDesc | KeyDTypeLike | None,
+) -> PRNGImpl:
   if impl_spec is None:
     return default_prng_impl()
   if type(impl_spec) is PRNGImpl:
@@ -175,6 +197,8 @@ def resolve_prng_impl(impl_spec: PRNGSpecDesc | None) -> PRNGImpl:
     return impl_spec
   if type(impl_spec) is PRNGSpec:
     return impl_spec._impl
+  if isinstance(impl_spec, prng.KeyTy):
+    return impl_spec._impl
   if type(impl_spec) is str:
     if impl_spec in prng.prngs:
       return prng.prngs[impl_spec]
@@ -184,7 +208,12 @@ def resolve_prng_impl(impl_spec: PRNGSpecDesc | None) -> PRNGImpl:
                      f'Did you mean one of: {keys_fmt}?')
 
   t = type(impl_spec)
-  raise TypeError(f'unrecognized type {t} for specifying PRNG implementation.')
+  raise TypeError(f"unrecognized type {t} for specifying PRNG implementation.")
+
+
+def key_dtype(impl_spec: PRNGSpecDesc | None = None) -> prng.KeyTy:
+  """Get the dtype corresponding to a PRNG implementation."""
+  return prng.KeyTy(resolve_prng_impl(impl_spec))
 
 
 def _key(ctor_name: str, seed: int | ArrayLike,
@@ -200,23 +229,31 @@ def _key(ctor_name: str, seed: int | ArrayLike,
   return prng.random_seed(seed, impl=impl)
 
 def key(seed: int | ArrayLike, *,
-        impl: PRNGSpecDesc | None = None) -> Array:
+        impl: PRNGSpecDesc | None = None,
+        dtype: KeyDTypeLike | None = None) -> Array:
   """Create a pseudo-random number generator (PRNG) key given an integer seed.
 
   The result is a scalar array containing a key, whose dtype indicates
   the default PRNG implementation, as determined by the optional
-  ``impl`` argument or, otherwise, by the ``jax_default_prng_impl``
+  ``dtype`` or ``impl`` argument or, otherwise, by the ``jax_default_prng_impl``
   config flag at the time when this function is called.
 
   Args:
     seed: a 64- or 32-bit integer used as the value of the key.
     impl: optional string specifying the PRNG implementation (e.g.
-      ``'threefry2x32'``)
+      ``'threefry2x32'``). Deprecated in favor of ``dtype``.
+    dtype: optional dtype or string name specifying the PRNG implementation
+      (e.g. ``jax.random.key_dtype('threefry2x32')`` or ``'threefry2x32'``).
 
   Returns:
     A scalar PRNG key array, consumable by random functions as well as ``split``
     and ``fold_in``.
   """
+  if dtype is not None:
+    if impl is not None:
+      raise ValueError(
+          "Cannot specify both `impl` and `dtype` arguments to jax.random.key")
+    impl = dtype
   return _key('key', seed, impl)
 
 def PRNGKey(seed: int | ArrayLike, *,
@@ -318,19 +355,42 @@ def key_data(keys: ArrayLike) -> Array:
 
 
 def wrap_key_data(key_bits_array: Array, *,
-                  impl: PRNGSpecDesc | None = None):
+                  impl: PRNGSpecDesc | None = None,
+                  dtype: KeyDTypeLike | None = None):
   """Wrap an array of key data bits into a PRNG key array.
 
   Args:
     key_bits_array: a ``uint32`` array with trailing shape corresponding to
       the key shape of the PRNG implementation specified by ``impl``.
     impl: optional, specifies a PRNG implementation, as in ``random.key``.
+    dtype: optional dtype or string name specifying the PRNG implementation
+      (e.g. ``jax.random.key_dtype('threefry2x32')`` or ``'threefry2x32'``).
 
   Returns:
     A PRNG key array, whose dtype is a subdtype of ``jax.dtypes.prng_key``
       corresponding to ``impl``, and whose shape equals the leading shape
       of ``key_bits_array.shape`` up to the key bit dimensions.
+
+  Examples:
+    Construct a key, and extract its data and dtype:
+
+    >>> import jax
+    >>> key = jax.random.key(42)
+    >>> data = jax.random.key_data(key)
+    >>> dtype = key.dtype
+
+    Reconstruct an equivalent key with :func:`wrap_key_data`:
+
+    >>> new_key = jax.random.wrap_key_data(data, dtype=dtype)
+    >>> key == new_key
+    Array(True, dtype=bool)
   """
+  if dtype is not None:
+    if impl is not None:
+      raise ValueError(
+          "Cannot specify both `impl` and `dtype` arguments to"
+          " jax.random.wrap_key_data")
+    impl = dtype
   impl_obj = resolve_prng_impl(impl)
   return prng.random_wrap(key_bits_array, impl=impl_obj)
 
@@ -361,7 +421,7 @@ def bits(key: ArrayLike,
          shape: Shape = (),
          dtype: DTypeLikeUInt | None = None,
          *,
-         out_sharding=None) -> Array:
+         out_sharding: NamedSharding | P | None = None) -> Array:
   """Sample uniform bits in the form of unsigned integers.
 
   Args:
@@ -370,6 +430,14 @@ def bits(key: ArrayLike,
       shape. Default ``()``.
     dtype: optional, an unsigned integer dtype for the returned values (default
       ``uint64`` if ``jax_enable_x64`` is true, otherwise ``uint32``).
+    out_sharding: Optional. Specifies how the output array should be sharded
+      across devices in multi-device computation. Can be a
+      :class:`~jax.sharding.NamedSharding`, a :class:`~jax.sharding.PartitionSpec`
+      (``P``), or ``None`` (default). When specified, the output will be sharded
+      according to the given sharding specification. Primarily used in explicit
+      sharding mode.
+      See the `explicit sharding tutorial <https://docs.jax.dev/en/latest/parallel.html>`_
+      for more details.
 
   Returns:
     A random array with the specified shape and dtype.
@@ -404,7 +472,7 @@ def uniform(key: ArrayLike,
             minval: RealArray = 0.,
             maxval: RealArray = 1.,
             *,
-            out_sharding=None) -> Array:
+            out_sharding: NamedSharding | P | None = None) -> Array:
   """Sample uniform random values in [minval, maxval) with given shape/dtype.
 
   Args:
@@ -415,6 +483,14 @@ def uniform(key: ArrayLike,
       jax_enable_x64 is true, otherwise float32).
     minval: optional, a minimum (inclusive) value broadcast-compatible with shape for the range (default 0).
     maxval: optional, a maximum (exclusive) value broadcast-compatible with shape for the range (default 1).
+    out_sharding: Optional. Specifies how the output array should be sharded
+      across devices in multi-device computation. Can be a
+      :class:`~jax.sharding.NamedSharding`, a :class:`~jax.sharding.PartitionSpec`
+      (``P``), or ``None`` (default). When specified, the output will be sharded
+      according to the given sharding specification. Primarily used in explicit
+      sharding mode.
+      See the `explicit sharding tutorial <https://docs.jax.dev/en/latest/parallel.html>`_
+      for more details.
 
   Returns:
     A random array with the specified shape and dtype.
@@ -519,7 +595,7 @@ def randint(key: ArrayLike,
             maxval: IntegerArray,
             dtype: DTypeLikeInt | None = None,
             *,
-            out_sharding=None) -> Array:
+            out_sharding: NamedSharding | P | None = None) -> Array:
   """Sample uniform random values in [minval, maxval) with given shape/dtype.
 
   Args:
@@ -531,6 +607,14 @@ def randint(key: ArrayLike,
       (exclusive) value for the range.
     dtype: optional, an int dtype for the returned values (default int64 if
       jax_enable_x64 is true, otherwise int32).
+    out_sharding: Optional. Specifies how the output array should be sharded
+      across devices in multi-device computation. Can be a
+      :class:`~jax.sharding.NamedSharding`, a :class:`~jax.sharding.PartitionSpec`
+      (``P``), or ``None`` (default). When specified, the output will be sharded
+      according to the given sharding specification. Primarily used in explicit
+      sharding mode.
+      See the `explicit sharding tutorial <https://docs.jax.dev/en/latest/parallel.html>`_
+      for more details.
 
   Returns:
     A random array with the specified shape and dtype.
@@ -662,7 +746,7 @@ def permutation(key: ArrayLike,
                 axis: int = 0,
                 independent: bool = False,
                 *,
-                out_sharding=None) -> Array:
+                out_sharding: NamedSharding | P | None = None) -> Array:
   """Returns a randomly permuted array or range.
 
   Args:
@@ -672,6 +756,14 @@ def permutation(key: ArrayLike,
     axis: int, optional. The axis which x is shuffled along. Default is 0.
     independent: bool, optional. If set to True, each individual vector along
       the given axis is shuffled independently. Default is False.
+    out_sharding: Optional. Specifies how the output array should be sharded
+      across devices in multi-device computation. Can be a
+      :class:`~jax.sharding.NamedSharding`, a :class:`~jax.sharding.PartitionSpec`
+      (``P``), or ``None`` (default). When specified, the output will be sharded
+      according to the given sharding specification. Primarily used in explicit
+      sharding mode.
+      See the `explicit sharding tutorial <https://docs.jax.dev/en/latest/parallel.html>`_
+      for more details.
 
   Returns:
     A shuffled version of x or array range
@@ -820,7 +912,7 @@ def normal(key: ArrayLike,
            shape: Shape = (),
            dtype: DTypeLikeFloat | None = None,
            *,
-           out_sharding=None) -> Array:
+           out_sharding: NamedSharding | P | None = None) -> Array:
   r"""Sample standard normal random values with given shape and float dtype.
 
   The values are returned according to the probability density function:
@@ -836,6 +928,14 @@ def normal(key: ArrayLike,
       shape. Default ().
     dtype: optional, a float dtype for the returned values (default float64 if
       jax_enable_x64 is true, otherwise float32).
+    out_sharding: Optional. Specifies how the output array should be sharded
+      across devices in multi-device computation. Can be a
+      :class:`~jax.sharding.NamedSharding`, a :class:`~jax.sharding.PartitionSpec`
+      (``P``), or ``None`` (default). When specified, the output will be sharded
+      according to the given sharding specification. Primarily used in explicit
+      sharding mode.
+      See the `explicit sharding tutorial <https://docs.jax.dev/en/latest/parallel.html>`_
+      for more details.
 
   Returns:
     A random array with the specified shape and dtype.
@@ -877,7 +977,9 @@ def multivariate_normal(key: ArrayLike,
                         cov: RealArray,
                         shape: Shape | None = None,
                         dtype: DTypeLikeFloat | None = None,
-                        method: str = 'cholesky') -> Array:
+                        method: str = 'cholesky',
+                        *,
+                        out_sharding: NamedSharding | P | None = None) -> Array:
   r"""Sample multivariate normal random values with given mean and covariance.
 
   The values are returned according to the probability density function:
@@ -903,6 +1005,15 @@ def multivariate_normal(key: ArrayLike,
     method: optional, a method to compute the factor of ``cov``.
       Must be one of 'svd', 'eigh', and 'cholesky'. Default 'cholesky'. For
       singular covariance matrices, use 'svd' or 'eigh'.
+    out_sharding: Optional. Specifies how the output array should be sharded
+      across devices in multi-device computation. Can be a
+      :class:`~jax.sharding.NamedSharding`, a :class:`~jax.sharding.PartitionSpec`
+      (``P``), or ``None`` (default). When specified, the output will be sharded
+      according to the given sharding specification. Primarily used in explicit
+      sharding mode.
+      See the `explicit sharding tutorial <https://docs.jax.dev/en/latest/parallel.html>`_
+      for more details.
+
   Returns:
     A random array with the specified dtype and shape given by
     ``shape + mean.shape[-1:]`` if ``shape`` is not None, or else
@@ -921,7 +1032,9 @@ def multivariate_normal(key: ArrayLike,
                      f"dtype, got {dtype}")
   if shape is not None:
     shape = core.canonicalize_shape(shape)
-  return _multivariate_normal(key, mean, cov, shape, dtype, method)
+  out_sharding = canonicalize_sharding_for_samplers(out_sharding, "multivariate_normal", shape)
+  return maybe_auto_axes(_multivariate_normal, out_sharding,
+                         shape=shape, dtype=dtype)(key, mean, cov, method=method)
 
 @jit(static_argnums=(3, 4, 5))
 def _multivariate_normal(key, mean, cov, shape, dtype, method) -> Array:
@@ -961,7 +1074,8 @@ def truncated_normal(key: ArrayLike,
                      upper: RealArray,
                      shape: Shape | None = None,
                      dtype: DTypeLikeFloat | None = None,
-                     *, out_sharding=None) -> Array:
+                     *,
+                     out_sharding: NamedSharding | P | None = None) -> Array:
   r"""Sample truncated standard normal random values with given shape and dtype.
 
   The values are returned according to the probability density function:
@@ -983,6 +1097,14 @@ def truncated_normal(key: ArrayLike,
       ``upper``.
     dtype: optional, a float dtype for the returned values (default float64 if
       jax_enable_x64 is true, otherwise float32).
+    out_sharding: Optional. Specifies how the output array should be sharded
+      across devices in multi-device computation. Can be a
+      :class:`~jax.sharding.NamedSharding`, a :class:`~jax.sharding.PartitionSpec`
+      (``P``), or ``None`` (default). When specified, the output will be sharded
+      according to the given sharding specification. Primarily used in explicit
+      sharding mode.
+      See the `explicit sharding tutorial <https://docs.jax.dev/en/latest/parallel.html>`_
+      for more details.
 
   Returns:
     A random array with the specified dtype and shape given by ``shape`` if
@@ -1029,7 +1151,8 @@ def bernoulli(key: ArrayLike,
               p: RealArray = 0.5,
               shape: Shape | None = None,
               mode: str = 'low',
-              *, out_sharding=None) -> Array:
+              *,
+              out_sharding: NamedSharding | P | None = None) -> Array:
   r"""Sample Bernoulli random values with given shape and mean.
 
   The values are distributed according to the probability mass function:
@@ -1051,6 +1174,14 @@ def bernoulli(key: ArrayLike,
       `p`. When sampling in float32, bernoulli samples with mode='low' produce
       incorrect results for p < ~1E-7. mode="high" approximately doubles the
       cost of sampling.
+    out_sharding: Optional. Specifies how the output array should be sharded
+      across devices in multi-device computation. Can be a
+      :class:`~jax.sharding.NamedSharding`, a :class:`~jax.sharding.PartitionSpec`
+      (``P``), or ``None`` (default). When specified, the output will be sharded
+      according to the given sharding specification. Primarily used in explicit
+      sharding mode.
+      See the `explicit sharding tutorial <https://docs.jax.dev/en/latest/parallel.html>`_
+      for more details.
 
   Returns:
     A random array with boolean dtype and shape given by ``shape`` if ``shape``
@@ -1093,7 +1224,9 @@ def beta(key: ArrayLike,
          a: RealArray,
          b: RealArray,
          shape: Shape | None = None,
-         dtype: DTypeLikeFloat | None = None) -> Array:
+         dtype: DTypeLikeFloat | None = None,
+         *,
+         out_sharding: NamedSharding | P | None = None) -> Array:
   r"""Sample Beta random values with given shape and float dtype.
 
   The values are distributed according to the probability density function:
@@ -1114,6 +1247,14 @@ def beta(key: ArrayLike,
       (None) produces a result shape by broadcasting ``a`` and ``b``.
     dtype: optional, a float dtype for the returned values (default float64 if
       jax_enable_x64 is true, otherwise float32).
+    out_sharding: Optional. Specifies how the output array should be sharded
+      across devices in multi-device computation. Can be a
+      :class:`~jax.sharding.NamedSharding`, a :class:`~jax.sharding.PartitionSpec`
+      (``P``), or ``None`` (default). When specified, the output will be sharded
+      according to the given sharding specification. Primarily used in explicit
+      sharding mode.
+      See the `explicit sharding tutorial <https://docs.jax.dev/en/latest/parallel.html>`_
+      for more details.
 
   Returns:
     A random array with the specified dtype and shape given by ``shape`` if
@@ -1127,9 +1268,12 @@ def beta(key: ArrayLike,
                      f"dtype, got {dtype}")
   if shape is not None:
     shape = core.canonicalize_shape(shape)
-  return _beta(key, a, b, shape, dtype)
+  out_sharding = canonicalize_sharding_for_samplers(out_sharding, "beta", shape)
 
+  return maybe_auto_axes(_beta, out_sharding,
+                         shape=shape, dtype=dtype)(key, a, b)
 
+@jit(static_argnums=(3, 4))
 def _beta(key, a, b, shape, dtype) -> Array:
   if shape is None:
     shape = lax.broadcast_shapes(np.shape(a), np.shape(b))
@@ -1154,7 +1298,9 @@ def _beta(key, a, b, shape, dtype) -> Array:
 
 def cauchy(key: ArrayLike,
            shape: Shape = (),
-           dtype: DTypeLikeFloat | None = None) -> Array:
+           dtype: DTypeLikeFloat | None = None,
+           *,
+           out_sharding: NamedSharding | P | None = None) -> Array:
   r"""Sample Cauchy random values with given shape and float dtype.
 
   The values are distributed according to the probability density function:
@@ -1170,6 +1316,14 @@ def cauchy(key: ArrayLike,
       shape. Default ().
     dtype: optional, a float dtype for the returned values (default float64 if
       jax_enable_x64 is true, otherwise float32).
+    out_sharding: Optional. Specifies how the output array should be sharded
+      across devices in multi-device computation. Can be a
+      :class:`~jax.sharding.NamedSharding`, a :class:`~jax.sharding.PartitionSpec`
+      (``P``), or ``None`` (default). When specified, the output will be sharded
+      according to the given sharding specification. Primarily used in explicit
+      sharding mode.
+      See the `explicit sharding tutorial <https://docs.jax.dev/en/latest/parallel.html>`_
+      for more details.
 
   Returns:
     A random array with the specified shape and dtype.
@@ -1181,7 +1335,9 @@ def cauchy(key: ArrayLike,
     raise ValueError(f"dtype argument to `cauchy` must be a float "
                      f"dtype, got {dtype}")
   shape = core.canonicalize_shape(shape)
-  return _cauchy(key, shape, dtype)
+  out_sharding = canonicalize_sharding_for_samplers(out_sharding, "cauchy", shape)
+  return maybe_auto_axes(_cauchy, out_sharding,
+                         shape=shape, dtype=dtype)(key)
 
 @jit(static_argnums=(1, 2))
 def _cauchy(key, shape, dtype) -> Array:
@@ -1194,7 +1350,9 @@ def _cauchy(key, shape, dtype) -> Array:
 def dirichlet(key: ArrayLike,
               alpha: RealArray,
               shape: Shape | None = None,
-              dtype: DTypeLikeFloat | None = None) -> Array:
+              dtype: DTypeLikeFloat | None = None,
+              *,
+              out_sharding: NamedSharding | P | None = None) -> Array:
   r"""Sample Dirichlet random values with given shape and float dtype.
 
   The values are distributed according to the probability density function:
@@ -1220,6 +1378,14 @@ def dirichlet(key: ArrayLike,
       ``alpha.shape``.
     dtype: optional, a float dtype for the returned values (default float64 if
       jax_enable_x64 is true, otherwise float32).
+    out_sharding: Optional. Specifies how the output array should be sharded
+      across devices in multi-device computation. Can be a
+      :class:`~jax.sharding.NamedSharding`, a :class:`~jax.sharding.PartitionSpec`
+      (``P``), or ``None`` (default). When specified, the output will be sharded
+      according to the given sharding specification. Primarily used in explicit
+      sharding mode.
+      See the `explicit sharding tutorial <https://docs.jax.dev/en/latest/parallel.html>`_
+      for more details.
 
   Returns:
     A random array with the specified dtype and shape given by
@@ -1234,11 +1400,13 @@ def dirichlet(key: ArrayLike,
                      f"dtype, got {dtype}")
   if shape is not None:
     shape = core.canonicalize_shape(shape)
-  return _dirichlet(key, alpha, shape, dtype)
+  out_sharding = canonicalize_sharding_for_samplers(out_sharding, "dirichlet", shape)
+  return maybe_auto_axes(_dirichlet, out_sharding,
+                         shape=shape, dtype=dtype)(key, alpha)
 
 @jit(static_argnums=(2, 3))
 def _dirichlet(key, alpha, shape, dtype) -> Array:
-  from jax._src.nn.functions import softmax  # pytype: disable=import-error
+  from jax._src.nn.functions import softmax  # pyrefly: ignore[missing-import]
 
   if not np.ndim(alpha) >= 1:
     msg = "dirichlet requires alpha.ndim >= 1, got alpha.ndim == {}"
@@ -1258,7 +1426,9 @@ def _dirichlet(key, alpha, shape, dtype) -> Array:
 
 def exponential(key: ArrayLike,
                 shape: Shape = (),
-                dtype: DTypeLikeFloat | None = None) -> Array:
+                dtype: DTypeLikeFloat | None = None,
+                *,
+                out_sharding: NamedSharding | P | None = None) -> Array:
   r"""Sample Exponential random values with given shape and float dtype.
 
   The values are distributed according to the probability density function:
@@ -1274,6 +1444,14 @@ def exponential(key: ArrayLike,
       shape. Default ().
     dtype: optional, a float dtype for the returned values (default float64 if
       jax_enable_x64 is true, otherwise float32).
+    out_sharding: Optional. Specifies how the output array should be sharded
+      across devices in multi-device computation. Can be a
+      :class:`~jax.sharding.NamedSharding`, a :class:`~jax.sharding.PartitionSpec`
+      (``P``), or ``None`` (default). When specified, the output will be sharded
+      according to the given sharding specification. Primarily used in explicit
+      sharding mode.
+      See the `explicit sharding tutorial <https://docs.jax.dev/en/latest/parallel.html>`_
+      for more details.
 
   Returns:
     A random array with the specified shape and dtype.
@@ -1285,7 +1463,9 @@ def exponential(key: ArrayLike,
     raise ValueError(f"dtype argument to `exponential` must be a float "
                      f"dtype, got {dtype}")
   shape = core.canonicalize_shape(shape)
-  return _exponential(key, shape, dtype)
+  out_sharding = canonicalize_sharding_for_samplers(out_sharding, "exponential", shape)
+  return maybe_auto_axes(_exponential, out_sharding,
+                         shape=shape, dtype=dtype)(key)
 
 @jit(static_argnums=(1, 2))
 def _exponential(key, shape, dtype) -> Array:
@@ -1443,7 +1623,9 @@ batching.primitive_batchers[random_gamma_p] = _gamma_batching_rule
 def gamma(key: ArrayLike,
           a: RealArray,
           shape: Shape | None = None,
-          dtype: DTypeLikeFloat | None = None) -> Array:
+          dtype: DTypeLikeFloat | None = None,
+          *,
+          out_sharding: NamedSharding | P | None = None) -> Array:
   r"""Sample Gamma random values with given shape and float dtype.
 
   The values are distributed according to the probability density function:
@@ -1467,6 +1649,14 @@ def gamma(key: ArrayLike,
       produces a result shape equal to ``a.shape``.
     dtype: optional, a float dtype for the returned values (default float64 if
       jax_enable_x64 is true, otherwise float32).
+    out_sharding: Optional. Specifies how the output array should be sharded
+      across devices in multi-device computation. Can be a
+      :class:`~jax.sharding.NamedSharding`, a :class:`~jax.sharding.PartitionSpec`
+      (``P``), or ``None`` (default). When specified, the output will be sharded
+      according to the given sharding specification. Primarily used in explicit
+      sharding mode.
+      See the `explicit sharding tutorial <https://docs.jax.dev/en/latest/parallel.html>`_
+      for more details.
 
   Returns:
     A random array with the specified dtype and with shape given by ``shape`` if
@@ -1484,13 +1674,16 @@ def gamma(key: ArrayLike,
                      f"dtype, got {dtype}")
   if shape is not None:
     shape = core.canonicalize_shape(shape)
-  return _gamma(key, a, shape=shape, dtype=dtype)
+  out_sharding = canonicalize_sharding_for_samplers(out_sharding, "gamma", shape)
+  return maybe_auto_axes(_gamma, out_sharding, shape=shape, dtype=dtype)(key, a)
 
 
 def loggamma(key: ArrayLike,
              a: RealArray,
              shape: Shape | None = None,
-             dtype: DTypeLikeFloat | None = None) -> Array:
+             dtype: DTypeLikeFloat | None = None,
+             *,
+             out_sharding: NamedSharding | P | None =None) -> Array:
   """Sample log-gamma random values with given shape and float dtype.
 
   This function is implemented such that the following will hold for a
@@ -1510,6 +1703,14 @@ def loggamma(key: ArrayLike,
       produces a result shape equal to ``a.shape``.
     dtype: optional, a float dtype for the returned values (default float64 if
       jax_enable_x64 is true, otherwise float32).
+    out_sharding: Optional. Specifies how the output array should be sharded
+      across devices in multi-device computation. Can be a
+      :class:`~jax.sharding.NamedSharding`, a :class:`~jax.sharding.PartitionSpec`
+      (``P``), or ``None`` (default). When specified, the output will be sharded
+      according to the given sharding specification. Primarily used in explicit
+      sharding mode.
+      See the `explicit sharding tutorial <https://docs.jax.dev/en/latest/parallel.html>`_
+      for more details.
 
   Returns:
     A random array with the specified dtype and with shape given by ``shape`` if
@@ -1526,7 +1727,8 @@ def loggamma(key: ArrayLike,
                      f"dtype, got {dtype}")
   if shape is not None:
     shape = core.canonicalize_shape(shape)
-  return _gamma(key, a, shape=shape, dtype=dtype, log_space=True)
+  out_sharding = canonicalize_sharding(out_sharding, "loggamma")
+  return maybe_auto_axes(_gamma, out_sharding, shape=shape, dtype=dtype, log_space=True)(key, a)
 
 
 @jit(static_argnames=('shape', 'dtype', 'log_space'))
@@ -1633,7 +1835,9 @@ def _poisson(key, lam, shape, dtype) -> Array:
 def poisson(key: ArrayLike,
             lam: RealArray,
             shape: Shape | None = None,
-            dtype: DTypeLikeInt | None = None) -> Array:
+            dtype: DTypeLikeInt | None = None,
+            *,
+            out_sharding: NamedSharding | P | None = None) -> Array:
   r"""Sample Poisson random values with given shape and integer dtype.
 
   The values are distributed according to the probability mass function:
@@ -1650,6 +1854,14 @@ def poisson(key: ArrayLike,
       shape. Default (None) produces a result shape equal to ``lam.shape``.
     dtype: optional, a integer dtype for the returned values (default int64 if
       jax_enable_x64 is true, otherwise int32).
+    out_sharding: Optional. Specifies how the output array should be sharded
+      across devices in multi-device computation. Can be a
+      :class:`~jax.sharding.NamedSharding`, a :class:`~jax.sharding.PartitionSpec`
+      (``P``), or ``None`` (default). When specified, the output will be sharded
+      according to the given sharding specification. Primarily used in explicit
+      sharding mode.
+      See the `explicit sharding tutorial <https://docs.jax.dev/en/latest/parallel.html>`_
+      for more details.
 
   Returns:
     A random array with the specified dtype and with shape given by ``shape`` if
@@ -1670,9 +1882,10 @@ def poisson(key: ArrayLike,
     shape = core.canonicalize_shape(shape)
   else:
     shape = np.shape(lam)
+  out_sharding = canonicalize_sharding_for_samplers(out_sharding, "poisson", shape)
   lam = jnp.broadcast_to(lam, shape)
   lam = lax.convert_element_type(lam, np.float32)
-  return _poisson(key, lam, shape, dtype)
+  return maybe_auto_axes(_poisson, out_sharding, shape=shape, dtype=dtype)(key, lam)
 
 
 def gumbel(key: ArrayLike,
@@ -1680,7 +1893,7 @@ def gumbel(key: ArrayLike,
            dtype: DTypeLikeFloat | None = None,
            mode: str | None = None,
            *,
-           out_sharding=None) -> Array:
+           out_sharding: NamedSharding | P | None = None) -> Array:
   """Sample Gumbel random values with given shape and float dtype.
 
   The values are distributed according to the probability density function:
@@ -1700,6 +1913,14 @@ def gumbel(key: ArrayLike,
       uniform resolution is such that the largest possible gumbel logit is ~16;
       with mode="high" this is increased to ~32, at approximately double the
       computational cost.
+    out_sharding: Optional. Specifies how the output array should be sharded
+      across devices in multi-device computation. Can be a
+      :class:`~jax.sharding.NamedSharding`, a :class:`~jax.sharding.PartitionSpec`
+      (``P``), or ``None`` (default). When specified, the output will be sharded
+      according to the given sharding specification. Primarily used in explicit
+      sharding mode.
+      See the `explicit sharding tutorial <https://docs.jax.dev/en/latest/parallel.html>`_
+      for more details.
 
   Returns:
     A random array with the specified shape and dtype.
@@ -1783,6 +2004,8 @@ def categorical(
   shape: Shape | None = None,
   replace: bool = True,
   mode: str | None = None,
+  *,
+  out_sharding: NamedSharding | P | None = None
 ) -> Array:
   """Sample random values from categorical distributions.
 
@@ -1805,6 +2028,14 @@ def categorical(
       for events with probability less than about 1E-7; with mode="high" this limit
       is pushed down to about 1E-14. mode="high" approximately doubles the cost of
       sampling.
+    out_sharding: Optional. Specifies how the output array should be sharded
+      across devices in multi-device computation. Can be a
+      :class:`~jax.sharding.NamedSharding`, a :class:`~jax.sharding.PartitionSpec`
+      (``P``), or ``None`` (default). When specified, the output will be sharded
+      according to the given sharding specification. Primarily used in explicit
+      sharding mode.
+      See the `explicit sharding tutorial <https://docs.jax.dev/en/latest/parallel.html>`_
+      for more details.
 
   Returns:
     A random array with int dtype and shape given by ``shape`` if ``shape``
@@ -1825,8 +2056,13 @@ def categorical(
   else:
     shape = core.canonicalize_shape(shape)
     _check_shape("categorical", shape, batch_shape)
-  shape_prefix = shape[:len(shape)-len(batch_shape)]
+  out_sharding = canonicalize_sharding(out_sharding, "categorical")
+  return maybe_auto_axes(_categorical, out_sharding, shape=shape,
+                         batch_shape=batch_shape, axis=axis,
+                         replace=replace, mode=mode)(key, logits_arr)
 
+def _categorical(key, logits_arr, shape, batch_shape, axis, replace, mode) -> Array:
+  shape_prefix = shape[:len(shape)-len(batch_shape)]
   if replace:
     if axis >= 0:
       axis -= len(logits_arr.shape)
@@ -1858,7 +2094,9 @@ def categorical(
 
 def laplace(key: ArrayLike,
             shape: Shape = (),
-            dtype: DTypeLikeFloat | None = None) -> Array:
+            dtype: DTypeLikeFloat | None = None,
+            *,
+            out_sharding: NamedSharding | P | None = None) -> Array:
   r"""Sample Laplace random values with given shape and float dtype.
 
   The values are distributed according to the probability density function:
@@ -1872,6 +2110,14 @@ def laplace(key: ArrayLike,
       shape. Default ().
     dtype: optional, a float dtype for the returned values (default float64 if
       jax_enable_x64 is true, otherwise float32).
+    out_sharding: Optional. Specifies how the output array should be sharded
+      across devices in multi-device computation. Can be a
+      :class:`~jax.sharding.NamedSharding`, a :class:`~jax.sharding.PartitionSpec`
+      (``P``), or ``None`` (default). When specified, the output will be sharded
+      according to the given sharding specification. Primarily used in explicit
+      sharding mode.
+      See the `explicit sharding tutorial <https://docs.jax.dev/en/latest/parallel.html>`_
+      for more details.
 
   Returns:
     A random array with the specified shape and dtype.
@@ -1883,7 +2129,9 @@ def laplace(key: ArrayLike,
     raise ValueError(f"dtype argument to `laplace` must be a float "
                      f"dtype, got {dtype}")
   shape = core.canonicalize_shape(shape)
-  return _laplace(key, shape, dtype)
+  out_sharding = canonicalize_sharding_for_samplers(out_sharding, "laplace", shape)
+  return maybe_auto_axes(_laplace, out_sharding,
+                         shape=shape, dtype=dtype)(key)
 
 @jit(static_argnums=(1, 2))
 def _laplace(key, shape, dtype) -> Array:
@@ -1895,7 +2143,9 @@ def _laplace(key, shape, dtype) -> Array:
 
 def logistic(key: ArrayLike,
              shape: Shape = (),
-             dtype: DTypeLikeFloat | None = None) -> Array:
+             dtype: DTypeLikeFloat | None = None,
+             *,
+             out_sharding: NamedSharding | P | None = None) -> Array:
   r"""Sample logistic random values with given shape and float dtype.
 
   The values are distributed according to the probability density function:
@@ -1909,6 +2159,14 @@ def logistic(key: ArrayLike,
       shape. Default ().
     dtype: optional, a float dtype for the returned values (default float64 if
       jax_enable_x64 is true, otherwise float32).
+    out_sharding: Optional. Specifies how the output array should be sharded
+      across devices in multi-device computation. Can be a
+      :class:`~jax.sharding.NamedSharding`, a :class:`~jax.sharding.PartitionSpec`
+      (``P``), or ``None`` (default). When specified, the output will be sharded
+      according to the given sharding specification. Primarily used in explicit
+      sharding mode.
+      See the `explicit sharding tutorial <https://docs.jax.dev/en/latest/parallel.html>`_
+      for more details.
 
   Returns:
     A random array with the specified shape and dtype.
@@ -1920,7 +2178,9 @@ def logistic(key: ArrayLike,
     raise ValueError(f"dtype argument to `logistic` must be a float "
                      f"dtype, got {dtype}")
   shape = core.canonicalize_shape(shape)
-  return _logistic(key, shape, dtype)
+  out_sharding = canonicalize_sharding_for_samplers(out_sharding, "logistic", shape)
+  return maybe_auto_axes(_logistic, out_sharding,
+                         shape=shape, dtype=dtype)(key)
 
 @jit(static_argnums=(1, 2))
 def _logistic(key, shape, dtype):
@@ -1932,7 +2192,9 @@ def _logistic(key, shape, dtype):
 def pareto(key: ArrayLike,
            b: RealArray,
            shape: Shape | None = None,
-           dtype: DTypeLikeFloat | None = None) -> Array:
+           dtype: DTypeLikeFloat | None = None,
+           *,
+           out_sharding: NamedSharding | P | None = None) -> Array:
   r"""Sample Pareto random values with given shape and float dtype.
 
   The values are distributed according to the probability density function:
@@ -1951,6 +2213,14 @@ def pareto(key: ArrayLike,
       produces a result shape equal to ``b.shape``.
     dtype: optional, a float dtype for the returned values (default float64 if
       jax_enable_x64 is true, otherwise float32).
+    out_sharding: Optional. Specifies how the output array should be sharded
+      across devices in multi-device computation. Can be a
+      :class:`~jax.sharding.NamedSharding`, a :class:`~jax.sharding.PartitionSpec`
+      (``P``), or ``None`` (default). When specified, the output will be sharded
+      according to the given sharding specification. Primarily used in explicit
+      sharding mode.
+      See the `explicit sharding tutorial <https://docs.jax.dev/en/latest/parallel.html>`_
+      for more details.
 
   Returns:
     A random array with the specified dtype and with shape given by ``shape`` if
@@ -1964,7 +2234,9 @@ def pareto(key: ArrayLike,
                      f"dtype, got {dtype}")
   if shape is not None:
     shape = core.canonicalize_shape(shape)
-  return _pareto(key, b, shape, dtype)
+  out_sharding = canonicalize_sharding_for_samplers(out_sharding, "pareto", shape)
+  return maybe_auto_axes(_pareto, out_sharding,
+                         shape=shape, dtype=dtype)(key, b)
 
 @jit(static_argnums=(2, 3))
 def _pareto(key, b, shape, dtype) -> Array:
@@ -1981,7 +2253,9 @@ def _pareto(key, b, shape, dtype) -> Array:
 def t(key: ArrayLike,
       df: RealArray,
       shape: Shape = (),
-      dtype: DTypeLikeFloat | None = None) -> Array:
+      dtype: DTypeLikeFloat | None = None,
+      *,
+      out_sharding: NamedSharding | P | None = None) -> Array:
   r"""Sample Student's t random values with given shape and float dtype.
 
   The values are distributed according to the probability density function:
@@ -2000,6 +2274,14 @@ def t(key: ArrayLike,
       produces a result shape equal to ``df.shape``.
     dtype: optional, a float dtype for the returned values (default float64 if
       jax_enable_x64 is true, otherwise float32).
+    out_sharding: Optional. Specifies how the output array should be sharded
+      across devices in multi-device computation. Can be a
+      :class:`~jax.sharding.NamedSharding`, a :class:`~jax.sharding.PartitionSpec`
+      (``P``), or ``None`` (default). When specified, the output will be sharded
+      according to the given sharding specification. Primarily used in explicit
+      sharding mode.
+      See the `explicit sharding tutorial <https://docs.jax.dev/en/latest/parallel.html>`_
+      for more details.
 
   Returns:
     A random array with the specified dtype and with shape given by ``shape`` if
@@ -2012,7 +2294,9 @@ def t(key: ArrayLike,
     raise ValueError(f"dtype argument to `t` must be a float "
                      f"dtype, got {dtype}")
   shape = core.canonicalize_shape(shape)
-  return _t(key, df, shape, dtype)
+  out_sharding = canonicalize_sharding_for_samplers(out_sharding, "t", shape)
+  return maybe_auto_axes(_t, out_sharding,
+                         shape=shape, dtype=dtype)(key, df)
 
 @jit(static_argnums=(2, 3))
 def _t(key, df, shape, dtype) -> Array:
@@ -2033,7 +2317,9 @@ def _t(key, df, shape, dtype) -> Array:
 def chisquare(key: ArrayLike,
               df: RealArray,
               shape: Shape | None = None,
-              dtype: DTypeLikeFloat | None = None) -> Array:
+              dtype: DTypeLikeFloat | None = None,
+              *,
+              out_sharding: NamedSharding | P | None = None) -> Array:
   r"""Sample Chisquare random values with given shape and float dtype.
 
   The values are distributed according to the probability density function:
@@ -2053,6 +2339,14 @@ def chisquare(key: ArrayLike,
       produces a result shape equal to ``df.shape``.
     dtype: optional, a float dtype for the returned values (default float64 if
       jax_enable_x64 is true, otherwise float32).
+    out_sharding: optional, Specifies how the output array should be sharded
+      across devices in multi-device computation. Can be a
+      :class:`~jax.sharding.NamedSharding`, a :class:`~jax.sharding.PartitionSpec`
+      (``P``), or ``None`` (default). When specified, the output will be sharded
+      according to the given sharding specification. Primarily used in explicit
+      sharding mode.
+      See the `explicit sharding tutorial <https://docs.jax.dev/en/latest/parallel.html>`_
+      for more details.
 
   Returns:
     A random array with the specified dtype and with shape given by ``shape`` if
@@ -2064,20 +2358,16 @@ def chisquare(key: ArrayLike,
   if not dtypes.issubdtype(dtype, np.floating):
     raise ValueError("dtype argument to `chisquare` must be a float "
                      f"dtype, got {dtype}")
-  if shape is not None:
-    shape = core.canonicalize_shape(shape)
-  return _chisquare(key, df, shape, dtype)
+  shape = _check_broadcast_shapes("chisquare", shape, df)
+  out_sharding = canonicalize_sharding_for_samplers(out_sharding, "chisquare", shape)
+  return _chisquare(key, df, shape, dtype, out_sharding)
 
-@jit(static_argnums=(2, 3))
-def _chisquare(key, df, shape, dtype) -> Array:
-  if shape is None:
-    shape = np.shape(df)
-  else:
-    _check_shape("chisquare", shape, np.shape(df))
+@jit(static_argnums=(2, 3, 4))
+def _chisquare(key, df, shape, dtype, out_sharding) -> Array:
   df = lax.convert_element_type(df, dtype)
   two = lax._const(df, 2)
   half_df = lax.div(df, two)
-  log_g = loggamma(key, a=half_df, shape=shape, dtype=dtype)
+  log_g = loggamma(key, a=half_df, shape=shape, dtype=dtype, out_sharding=out_sharding)
   chi2 = lax.mul(jnp.exp(log_g), two)
   return chi2
 
@@ -2086,7 +2376,9 @@ def f(key: ArrayLike,
       dfnum: RealArray,
       dfden: RealArray,
       shape: Shape | None = None,
-      dtype: DTypeLikeFloat | None = None) -> Array:
+      dtype: DTypeLikeFloat | None = None,
+      *,
+      out_sharding: NamedSharding | P | None = None) -> Array:
   r"""Sample F-distribution random values with given shape and float dtype.
 
   The values are distributed according to the probability density function:
@@ -2111,6 +2403,14 @@ def f(key: ArrayLike,
       and ``dfden.shape``.
     dtype: optional, a float dtype for the returned values (default float64 if
       jax_enable_x64 is true, otherwise float32).
+    out_sharding: optional, specifies how the output array should be sharded
+      across devices in multi-device computation. Can be a
+      :class:`~jax.sharding.NamedSharding`, a :class:`~jax.sharding.PartitionSpec`
+      (``P``), or ``None`` (default). When specified, the output will be sharded
+      according to the given sharding specification. Primarily used in explicit
+      sharding mode.
+      See the `explicit sharding tutorial <https://docs.jax.dev/en/latest/parallel.html>`_
+      for more details.
 
   Returns:
     A random array with the specified dtype and with shape given by ``shape`` if
@@ -2122,24 +2422,17 @@ def f(key: ArrayLike,
   if not dtypes.issubdtype(dtype, np.floating):
     raise ValueError("dtype argument to `f` must be a float "
                      f"dtype, got {dtype}")
-  if shape is not None:
-    shape = core.canonicalize_shape(shape)
-  return _f(key, dfnum, dfden, shape, dtype)
+  shape = _check_broadcast_shapes("f", shape, dfnum, dfden)
+  out_sharding = canonicalize_sharding_for_samplers(out_sharding, "f", shape)
+  return _f(key, dfnum, dfden, shape, dtype, out_sharding)
 
-@jit(static_argnums=(3, 4))
-def _f(key, dfnum, dfden, shape, dtype) -> Array:
-  if shape is None:
-    shape =  lax.broadcast_shapes(np.shape(dfden), np.shape(dfnum))
-  else:
-    _check_shape("f", shape, np.shape(dfden), np.shape(dfnum))
+@jit(static_argnums=(3, 4, 5))
+def _f(key, dfnum, dfden, shape, dtype, out_sharding) -> Array:
   dfden = lax.convert_element_type(dfden, dtype)
   dfnum = lax.convert_element_type(dfnum, dtype)
   key_dfd, key_dfn = _split(key)
-  chi2_dfn = chisquare(key_dfn, dfnum, shape, dtype)
-  chi2_dfd = chisquare(key_dfd, dfden, shape, dtype)
-  # broadcast dfden and dfnum to do div operation
-  dfden = jnp.broadcast_to(dfden, shape)
-  dfnum = jnp.broadcast_to(dfnum, shape)
+  chi2_dfn = chisquare(key_dfn, dfnum, shape, dtype, out_sharding=out_sharding)
+  chi2_dfd = chisquare(key_dfd, dfden, shape, dtype, out_sharding=out_sharding)
   num = lax.div(chi2_dfn, dfnum)
   den = lax.div(chi2_dfd ,dfden)
   f = lax.div(num, den)
@@ -2148,7 +2441,9 @@ def _f(key, dfnum, dfden, shape, dtype) -> Array:
 
 def rademacher(key: ArrayLike,
                shape: Shape = (),
-               dtype: DTypeLikeInt | None = None) -> Array:
+               dtype: DTypeLikeInt | None = None,
+               *,
+               out_sharding: NamedSharding | P | None = None) -> Array:
   r"""Sample from a Rademacher distribution.
 
   The values are distributed according to the probability mass function:
@@ -2162,6 +2457,14 @@ def rademacher(key: ArrayLike,
     key: a PRNG key.
     shape: The shape of the returned samples. Default ().
     dtype: The type used for samples.
+    out_sharding: optional, specifies how the output array should be sharded
+      across devices in multi-device computation. Can be a
+      :class:`~jax.sharding.NamedSharding`, a :class:`~jax.sharding.PartitionSpec`
+      (``P``), or ``None`` (default). When specified, the output will be sharded
+      according to the given sharding specification. Primarily used in explicit
+      sharding mode.
+      See the `explicit sharding tutorial <https://docs.jax.dev/en/latest/parallel.html>`_
+      for more details.
 
   Returns:
     A jnp.array of samples, of shape `shape`. Each element in the output has
@@ -2172,12 +2475,14 @@ def rademacher(key: ArrayLike,
   dtype = dtypes.check_and_canonicalize_user_dtype(
       int if dtype is None else dtype)
   shape = core.canonicalize_shape(shape)
-  return _rademacher(key, shape, dtype)
+  out_sharding = canonicalize_sharding_for_samplers(out_sharding, "rademacher", shape)
+  return _rademacher(key, shape, dtype, out_sharding)
 
 
-@jit(static_argnums=(1, 2))
-def _rademacher(key, shape, dtype) -> Array:
-  bernoulli_samples = bernoulli(key=key, p=0.5, shape=shape).astype(dtype)
+@jit(static_argnums=(1, 2, 3))
+def _rademacher(key, shape, dtype, out_sharding) -> Array:
+  bernoulli_samples = bernoulli(key=key, p=0.5, shape=shape,
+                                out_sharding=out_sharding).astype(dtype)
   return (2 * bernoulli_samples - 1).astype(dtype)
 
 
@@ -2324,7 +2629,8 @@ def orthogonal(
   shape: Shape = (),
   dtype: DTypeLikeFloat | None = None,
   m: int | None = None,
-) -> Array:
+  *,
+  out_sharding: NamedSharding | P | None = None) -> Array:
   r"""Sample uniformly from the orthogonal group O(n).
 
   If the dtype is complex, sample uniformly from the unitary group U(n).
@@ -2343,6 +2649,14 @@ def orthogonal(
     dtype: optional, a float dtype for the returned values (default float64 if
       jax_enable_x64 is true, otherwise float32).
     m: an integer indicating the number of columns. Defaults to `n`.
+    out_sharding: optional, specifies how the output array should be sharded
+      across devices in multi-device computation. Can be a
+      :class:`~jax.sharding.NamedSharding`, a :class:`~jax.sharding.PartitionSpec`
+      (``P``), or ``None`` (default). When specified, the output will be sharded
+      according to the given sharding specification. Primarily used in explicit
+      sharding mode.
+      See the `explicit sharding tutorial <https://docs.jax.dev/en/latest/parallel.html>`_
+      for more details.
 
   Returns:
     A random array of shape `(*shape, n, m)` and specified dtype.
@@ -2363,7 +2677,11 @@ def orthogonal(
   _check_shape("orthogonal", shape)
   n = core.concrete_or_error(index, n, "The error occurred in jax.random.orthogonal()")
   _m = core.concrete_or_error(index, _m, "The error occurred in jax.random.orthogonal()")
+  out_sharding = canonicalize_sharding_for_samplers(out_sharding, "orthogonal", shape)
+  return maybe_auto_axes(_orthogonal, out_sharding, n=n, _m=_m, shape=shape, dtype=dtype)(key)
 
+@jit(static_argnums=(1, 2, 3, 4))
+def _orthogonal(key, n, _m, shape, dtype):
   z = normal(key, (*shape, max(n, _m), min(n, _m)), dtype)
   q, r = jnp_linalg.qr(z)
   d = jnp_linalg.diagonal(r)
@@ -2415,7 +2733,9 @@ def ball(
   d: int,
   p: float = 2,
   shape: Shape = (),
-  dtype: DTypeLikeFloat | None = None
+  dtype: DTypeLikeFloat | None = None,
+  *,
+  out_sharding: NamedSharding | P | None = None,
 ):
   """Sample uniformly from the unit Lp ball.
 
@@ -2428,6 +2748,14 @@ def ball(
     shape: optional, the batch dimensions of the result. Default ().
     dtype: optional, a float dtype for the returned values (default float64 if
       jax_enable_x64 is true, otherwise float32).
+    out_sharding: optional, specifies how the output array should be sharded
+      across devices in multi-device computation. Can be a
+      :class:`~jax.sharding.NamedSharding`, a :class:`~jax.sharding.PartitionSpec`
+      (``P``), or ``None`` (default). When specified, the output will be sharded
+      according to the given sharding specification. Primarily used in explicit
+      sharding mode.
+      See the `explicit sharding tutorial <https://docs.jax.dev/en/latest/parallel.html>`_
+      for more details.
 
   Returns:
     A random array of shape `(*shape, d)` and specified dtype.
@@ -2438,6 +2766,11 @@ def ball(
       float if dtype is None else dtype)
   _check_shape("ball", shape)
   d = core.concrete_or_error(index, d, "The error occurred in jax.random.ball()")
+  out_sharding = canonicalize_sharding(out_sharding, "ball")
+  return maybe_auto_axes(_ball, out_sharding, d=d,  shape=shape, dtype=dtype)(key, p)
+
+@jit(static_argnums=(2, 3, 4))
+def _ball(key, p, d, shape, dtype):
   k1, k2 = split(key)
   g = generalized_normal(k1, p, (*shape, d), dtype)
   e = exponential(k2, shape, dtype)
@@ -2447,7 +2780,9 @@ def ball(
 def rayleigh(key: ArrayLike,
              scale: RealArray,
              shape: Shape | None = None,
-             dtype: DTypeLikeFloat | None = None) -> Array:
+             dtype: DTypeLikeFloat | None = None,
+             *,
+             out_sharding: NamedSharding | P | None = None) -> Array:
   r"""Sample Rayleigh random values with given shape and float dtype.
 
   The values are returned according to the probability density function:
@@ -2467,6 +2802,14 @@ def rayleigh(key: ArrayLike,
       produces a result shape equal to ``scale.shape``.
     dtype: optional, a float dtype for the returned values (default float64 if
       jax_enable_x64 is true, otherwise float32).
+    out_sharding: Optional. Specifies how the output array should be sharded
+      across devices in multi-device computation. Can be a
+      :class:`~jax.sharding.NamedSharding`, a :class:`~jax.sharding.PartitionSpec`
+      (``P``), or ``None`` (default). When specified, the output will be sharded
+      according to the given sharding specification. Primarily used in explicit
+      sharding mode.
+      See the `explicit sharding tutorial <https://docs.jax.dev/en/latest/parallel.html>`_
+      for more details.
 
   Returns:
     A random array with the specified dtype and with shape given by ``shape`` if
@@ -2480,7 +2823,9 @@ def rayleigh(key: ArrayLike,
                      f"dtype, got {dtype}")
   if shape is not None:
     shape = core.canonicalize_shape(shape)
-  return _rayleigh(key, scale, shape, dtype)
+  out_sharding = canonicalize_sharding_for_samplers(out_sharding, "rayleigh", shape)
+  return maybe_auto_axes(_rayleigh, out_sharding,
+                         shape=shape, dtype=dtype)(key, scale)
 
 @jit(static_argnums=(2, 3))
 def _rayleigh(key, scale, shape, dtype) -> Array:
@@ -2500,7 +2845,9 @@ def _rayleigh(key, scale, shape, dtype) -> Array:
 def wald(key: ArrayLike,
          mean: RealArray,
          shape: Shape | None = None,
-         dtype: DTypeLikeFloat | None = None) -> Array:
+         dtype: DTypeLikeFloat | None = None,
+         *,
+         out_sharding: NamedSharding | P | None = None) -> Array:
   r"""Sample Wald random values with given shape and float dtype.
 
   The values are returned according to the probability density function:
@@ -2521,6 +2868,14 @@ def wald(key: ArrayLike,
       (None) produces a result shape equal to ``np.shape(mean)``.
     dtype: optional, a float dtype for the returned values (default float64 if
       jax_enable_x64 is true, otherwise float32).
+    out_sharding: optional, specifies how the output array should be sharded
+      across devices in multi-device computation. Can be a
+      :class:`~jax.sharding.NamedSharding`, a :class:`~jax.sharding.PartitionSpec`
+      (``P``), or ``None`` (default). When specified, the output will be sharded
+      according to the given sharding specification. Primarily used in explicit
+      sharding mode.
+      See the `explicit sharding tutorial <https://docs.jax.dev/en/latest/parallel.html>`_
+      for more details.
 
   Returns:
     A random array with the specified dtype and with shape given by ``shape`` if
@@ -2532,16 +2887,13 @@ def wald(key: ArrayLike,
   if not dtypes.issubdtype(dtype, np.floating):
     raise ValueError("dtype argument to `wald` must be a float "
                      f"dtype, got {dtype}")
-  if shape is not None:
-    shape = core.canonicalize_shape(shape)
-  return _wald(key, mean, shape, dtype)
+  shape = _check_broadcast_shapes("wald", shape, mean)
+  out_sharding = canonicalize_sharding(out_sharding, "wald")
+  _check_all_safe_to_cast("wald", dtype, mean)
+  return maybe_auto_axes(_wald, out_sharding, shape=shape, dtype=dtype)(key, mean)
 
 @jit(static_argnums=(2, 3))
 def _wald(key, mean, shape, dtype) -> Array:
-  if shape is None:
-    shape =  np.shape(mean)
-  else:
-    _check_shape("wald", shape, np.shape(mean))
   k1, k2 = _split(key, 2)
   mean = mean.astype(dtype)
   mean = jnp.broadcast_to(mean, shape)
@@ -2675,7 +3027,9 @@ def _triangular(key, left, mode, right, shape, dtype) -> Array:
 def lognormal(key: ArrayLike,
               sigma: RealArray = np.float32(1),
               shape: Shape | None = None,
-              dtype: DTypeLikeFloat | None = None) -> Array:
+              dtype: DTypeLikeFloat | None = None,
+              *,
+              out_sharding: NamedSharding | P | None = None) -> Array:
   r""" Sample lognormal random values with given shape and float dtype.
 
   The values are distributed according to the probability density function:
@@ -2693,27 +3047,31 @@ def lognormal(key: ArrayLike,
       shape. The default (None) produces a result shape equal to ``()``.
     dtype: optional, a float dtype for the returned values (default float64 if
       jax_enable_x64 is true, otherwise float32).
+    out_sharding: optional, specifies how the output array should be sharded
+      across devices in multi-device computation. Can be a
+      :class:`~jax.sharding.NamedSharding`, a :class:`~jax.sharding.PartitionSpec`
+      (``P``), or ``None`` (default). When specified, the output will be sharded
+      according to the given sharding specification. Primarily used in explicit
+      sharding mode.
+      See the `explicit sharding tutorial <https://docs.jax.dev/en/latest/parallel.html>`_
+      for more details.
 
   Returns:
     A random array with the specified dtype and with shape given by ``shape``.
   """
   key, _ = _check_prng_key("lognormal", key)
-  dtype = dtypes.check_and_canonicalize_user_dtype(
-      float if dtype is None else dtype)
+  dtype = dtypes.check_and_canonicalize_user_dtype(float if dtype is None else dtype)
   if not dtypes.issubdtype(dtype, np.inexact):
     raise ValueError(f"dtype argument to `lognormal` must be a float or complex dtype, "
-                     f"got {dtype}")
-  if shape is not None:
-    shape = core.canonicalize_shape(shape)
-  return _lognormal(key, sigma, shape, dtype)
+                    f"got {dtype}")
+  shape = _check_broadcast_shapes("lognormal", shape, sigma)
+  out_sharding = canonicalize_sharding(out_sharding, "lognormal")
+  _check_all_safe_to_cast("lognormal", dtype, sigma)
+  return maybe_auto_axes(_lognormal, out_sharding, shape=shape, dtype=dtype)(key, sigma)
 
 @jit(static_argnums=(2, 3), inline=True)
 def _lognormal(key, sigma, shape, dtype) -> Array:
-  if shape is None:
-    shape =  np.shape(sigma)
-  else:
-    _check_shape("triangular", shape, np.shape(sigma))
-  sigma = jnp.broadcast_to(sigma, shape)
+  sigma = lax.convert_element_type(sigma, dtype)
   scaled_norm = normal(key, shape, dtype) * sigma
   return lax.exp(scaled_norm)
 
@@ -3011,7 +3369,7 @@ def clone(key):
 
 
 def random_insert_pvary(name, key, *args):
-  if not config._check_vma.value:
+  if not config._check_vma.value or not config.auto_pcast.value:
     return key, args
   if not args:
     return key, args

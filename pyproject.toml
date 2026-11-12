@@ -41,7 +41,7 @@ doctest_optionflags = [
 addopts = "--doctest-glob='*.rst' --ignore='examples/ffi' --import-mode=importlib"
 
 [tool.pyrefly]
-python-version = "3.11"
+python-version = "3.13"
 project-includes = [
     "jax/**/*.py*",
 ]
@@ -52,6 +52,7 @@ project-excludes = [
 ]
 ignore-missing-imports = [
     "absl.*",
+    "cloudpickle.*",
     "filelock.*",
     "flatbuffers.*",
     "flax.*",
@@ -81,7 +82,6 @@ ignore-missing-imports = [
     "xprof.*",
     "zstandard.*",
 ]
-permissive-ignores = true
 untyped-def-behavior = "check-and-infer-return-any"
 
 [tool.ruff]

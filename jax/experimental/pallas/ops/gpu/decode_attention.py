@@ -418,7 +418,7 @@ def mqa_reference(
     return o
 
 
-@functools.partial(jax.jit, static_argnames=["sm_scale"])
+@jax.jit(static_argnames=["sm_scale"])
 def mha_reference(
     q,                # [bs, num_q_heads, head_dim]
     k,                # [bs, k_seq_len, num_k_heads, head_dim]

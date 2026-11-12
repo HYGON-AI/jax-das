@@ -53,7 +53,6 @@ from jax._src.sharding_impls import (
     NamedSharding, make_single_device_sharding, GSPMDSharding)
 from jax._src.stages import SourceInfo
 import numpy as np
-from jax._src.lib import jaxlib_extension_version
 
 
 JAXPR_TRACE_EVENT = "/jax/core/compile/jaxpr_trace_duration"
@@ -254,7 +253,7 @@ def jaxpr_has_prim_requiring_devices(jaxpr: core.Jaxpr) -> bool:
 @util.weakref_lru_cache
 def get_intermediate_shardings(
     jaxpr: core.Jaxpr) -> Sequence[tuple[Sharding, SourceInfo]]:
-  from jax._src import shard_map  # pytype: disable=import-error
+  from jax._src import shard_map  # pyrefly: ignore[missing-module-attribute]
 
   out = []
   for eqn in jaxpr.eqns:
@@ -438,7 +437,7 @@ def _device_put_sharding_impl(
     device: Device | Sharding | None,
     copy: ArrayCopySemantics,
 ):
-  from jax.experimental import multihost_utils  # pytype: disable=import-error
+  from jax.experimental import multihost_utils  # pyrefly: ignore[missing-import]
 
   # Use a dynamic type, because the static type depends on the value of
   # ``x_is_jax_array``.
@@ -459,10 +458,7 @@ def _device_put_sharding_impl(
 
     if isinstance(s, NamedSharding) and s.spec.unreduced:
       # TODO(mattjj,yashkatariya): handle donation
-      if jaxlib_extension_version >= 428:
-        return api.jit(_device_put_reshard, out_shardings=s)(x)
-      else:
-        return pjit.reshard(x, s)
+      return api.jit(_device_put_reshard, out_shardings=s)(x)
 
     if (not s_is_fully_addressable and
         x_is_jax_array and not x_is_fully_addressable and
@@ -751,7 +747,7 @@ def _tpu_gpu_device_put_lowering(ctx, *xs, devices, srcs, copy_semantics):
       mem_kind = (core.mem_space_to_kind(device)
                   if isinstance(device, core.MemorySpace) else device.memory_kind)
       assert mem_kind is not None
-      x = mlir.wrap_with_memory_kind(x, mem_kind, out_aval)
+      x = mlir.wrap_with_memory_kind(ctx.module_context, x, mem_kind, out_aval)
       return x
     return x
   return list(map(lower, xs, devices, ctx.avals_in, ctx.avals_out))

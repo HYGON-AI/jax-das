@@ -14,10 +14,10 @@
 
 # Package for Mosaic-specific Pallas extensions
 
-load("@rules_python//python:defs.bzl", "py_library")
 load(
     "//jaxlib:jax.bzl",
     "py_deps",
+    "py_library",
     "pytype_strict_library",
 )
 

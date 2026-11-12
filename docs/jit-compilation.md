@@ -215,7 +215,7 @@ To specify such arguments when using `jit` as a decorator, a common pattern is t
 ```{code-cell}
 from functools import partial
 
-@partial(jax.jit, static_argnames=['n'])
+@jax.jit(static_argnames=['n'])
 def g_jit_decorated(x, n):
   i = 0
   while i < n:

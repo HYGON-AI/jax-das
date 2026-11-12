@@ -14,8 +14,7 @@
 
 # Package for Pallas TPU Interpret Mode
 
-load("@rules_python//python:defs.bzl", "py_library")
-load("//jaxlib:jax.bzl", "py_deps", "pytype_strict_library")
+load("//jaxlib:jax.bzl", "py_deps", "py_library", "pytype_strict_library")
 
 package(
     default_applicable_licenses = [],
@@ -64,6 +63,7 @@ py_library(
         "//jax/_src/pallas",
         "//jax/_src/pallas/mosaic:core",
         "//jax/_src/pallas/mosaic:primitives",
+        "//jax/_src/pallas/mosaic:tpu_info",
     ] + py_deps("numpy"),
 )
 

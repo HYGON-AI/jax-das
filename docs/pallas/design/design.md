@@ -461,7 +461,7 @@ def matmul_kernel(x_ref, y_ref, o_ref, *, activation, block_k):
 x, y = jnp.ones((512, 256)), jnp.ones((256, 1024))
 block_shape = 128, 256, 128
 
-@partial(jax.jit, static_argnames=["block_shape", "activation"])
+@jax.jit(static_argnames=["block_shape", "activation"])
 def matmul(x, y, *, block_shape, activation):
   block_m, block_n, block_k = block_shape
   fused_matmul = pl.pallas_call(

@@ -308,6 +308,9 @@ class PRNGKeyArray(Array):
     # ShapedArray._iter when the element type is KeyTy...
     return (PRNGKeyArray(self._impl, k) for k in iter(self._base_array))
 
+  def __bool__(self):
+    raise TypeError("key array cannot be converted to boolean.")
+
   def __repr__(self):
     return (f'Array({self.shape}, dtype={self.dtype.name}) overlaying:\n'
             f'{self._base_array}')
@@ -638,7 +641,7 @@ mlir.register_lowering(random_split_p, random_split_lowering)
 
 def random_fold_in(keys, msgs):
   msgs = jnp.asarray(msgs)
-  keys, msgs = core.standard_insert_pvary(keys, msgs)
+  keys, msgs = core.auto_insert_reshard(keys, msgs)
   return random_fold_in_p.bind(keys, msgs)
 
 random_fold_in_p = core.Primitive('random_fold_in')
@@ -859,8 +862,8 @@ def _threefry2x32_abstract_eval(*args):
     raise TypeError("Arguments to threefry2x32 must have uint32 type, got {}"
                     .format(args))
   if all(isinstance(arg, core.ShapedArray) for arg in args):
-    shape = lax.broadcasting_shape_rule(*args)
-    sharding = lax.broadcasting_sharding_rule(*args)
+    shape = lax.broadcasting_shape_rule("threefry2x32", *args)
+    sharding = lax.broadcasting_sharding_rule("threefry2x32", *args)
     aval = core.ShapedArray(shape, np.dtype('uint32'), sharding=sharding)
   else:
     raise TypeError(f"Arguments to threefry2x32 must all be arrays, got {args}")
@@ -1092,7 +1095,7 @@ def iota_2x32_shape_lowering(ctx, *, shape):
   shift = mlir.broadcast_in_dim(ctx, shift, aval_u64,
                                 broadcast_dimensions=[])
   counts_shifted = mlir.hlo.shift_right_logical(counts, shift)
-  result_type = mlir.aval_to_ir_type(aval_out)
+  result_type = mlir.aval_to_ir_type(ctx.module_context, aval_out)
   counts_lo = mlir.hlo.convert(result_type, counts)
   counts_hi = mlir.hlo.convert(result_type, counts_shifted)
   return counts_hi, counts_lo
@@ -1340,8 +1343,8 @@ register_prng(unsafe_rbg_prng_impl)
 
 # Register export serialization for PRNG key types.
 try:
-  from jax._src.export import serialization  # pytype: disable=import-error
-  from jax._src.export import serialization_generated as ser_flatbuf  # pytype: disable=import-error
+  from jax._src.export import serialization
+  from jax._src.export import serialization_generated as ser_flatbuf
 except ImportError:
   # This can happen if flatbuffers is not installed, in which case export
   # serialization is not supported and it is safe to skip the registration.

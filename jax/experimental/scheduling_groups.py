@@ -19,7 +19,7 @@ from jax._src import dispatch
 from jax._src import linear_util as lu
 from jax._src.api_util import debug_info
 from jax._src.util import (safe_map, safe_zip, weakref_lru_cache, unzip2,
-                           split_list)
+                           split_list, subs_list)
 from jax._src.tree_util import tree_flatten, tree_unflatten, FlatTree
 from jax._src.interpreters import ad, mlir, partial_eval as pe, batching
 from jax._src.lib.mlir.dialects import func as func_dialect
@@ -117,25 +117,31 @@ def _xla_metadata_call_jvp(primals, tangents, *, jaxpr, **meta):
 ad.primitive_jvps[xla_metadata_call_p] = _xla_metadata_call_jvp
 
 
-def _xla_metadata_call_lin(_is_vjp, nzs, *primals, jaxpr, **meta):
-  # TODO(mattjj,yashkatariya): should use ad.linearize_jaxpr here
-  jaxpr_jvp, out_nzs = ad.jvp_jaxpr(jaxpr, nzs, False)
-  lin_outs = [False] * len(out_nzs) + [True] * sum(out_nzs)
-  jaxpr_lin_, used_inputs = pe.dce_jaxpr(jaxpr_jvp.jaxpr, lin_outs, False)
-  jaxpr_lin = pe.close_jaxpr(jaxpr_lin_)
-  primals_out = xla_metadata_call_p.bind(*primals, jaxpr=jaxpr, **meta)
+def _xla_metadata_call_lin(is_vjp, nzs, *primals, jaxpr, **meta):
+  (primal_jaxpr, num_residuals_out, nzs_out, in_fwd_res,
+   tangent_jaxpr) = ad.linearize_jaxpr(jaxpr, nzs, is_vjp=is_vjp)
+
   tangent_avals_out = [a.to_tangent_aval() for a in jaxpr.out_avals]
 
-  def xla_metadata_call_lin(primals, *tangents):
-    nz_tangents = [t for t in tangents if not isinstance(t, ad.Zero)]
-    inputs = [x for x, u in zip([*primals, *nz_tangents], used_inputs) if u]
-    nz_outs = xla_metadata_call_p.bind(*inputs, jaxpr=jaxpr_lin, **meta)
+  def _filter_zeros(is_nz_l, l):
+    return tuple(x for nz, x in zip(is_nz_l, l) if nz)
+
+  def tangent_fun(residuals, *tangents):
+    tangents_nz = _filter_zeros(nzs, tangents)
+    assert len(residuals) + len(tangents_nz) == len(tangent_jaxpr.invars), (
+        len(residuals), len(tangents_nz), len(tangent_jaxpr.invars))
+    nz_outs = xla_metadata_call_p.bind(*residuals, *tangents_nz,
+                                       jaxpr=tangent_jaxpr, **meta)
     nz_outs_ = iter(nz_outs)
     outs = [next(nz_outs_) if nz else ad.Zero(a)
-            for nz, a in zip(out_nzs, tangent_avals_out)]
+            for nz, a in zip(nzs_out, tangent_avals_out)]
     assert next(nz_outs_, None) is None
     return outs
-  return primals_out, out_nzs, primals, xla_metadata_call_lin
+
+  ans = xla_metadata_call_p.bind(*primals, jaxpr=primal_jaxpr, **meta)
+  primal_ans, residuals_ans = split_list(ans, [len(ans) - num_residuals_out])
+  residuals_ans = subs_list(in_fwd_res, [*jaxpr.consts, *primals], residuals_ans)
+  return primal_ans, nzs_out, residuals_ans, tangent_fun
 ad.primitive_linearizations[xla_metadata_call_p] = _xla_metadata_call_lin
 
 
@@ -170,13 +176,16 @@ def dce_jaxpr_xla_metadata_rule(used_outputs: list[bool], eqn: pe.JaxprEqn
                                 ) -> tuple[list[bool], pe.JaxprEqn | None]:
   if not any(used_outputs) and not pe.has_effects(eqn):
     return [False] * len(eqn.invars), None
-  jaxpr_ = eqn.params['jaxpr']
-  closed_jaxpr, used_inputs = pe._cached_closed_call_dce(
-      jaxpr_, tuple(used_outputs))
-  new_params = dict(eqn.params, jaxpr=closed_jaxpr)
-  new_eqn = pe.new_jaxpr_eqn(
-      [v for v, used in zip(eqn.invars, used_inputs) if used],
-      [v for v, used in zip(eqn.outvars, used_outputs) if used],
-      eqn.primitive, new_params, closed_jaxpr.effects, eqn.source_info, eqn.ctx)
-  return used_inputs, new_eqn
+  dced_jaxpr, used_inputs = pe._cached_closed_call_dce(
+      eqn.params['jaxpr'], tuple(used_outputs))
+  new_params = dict(eqn.params, jaxpr=dced_jaxpr)
+  if not any(used_inputs) and not any(used_outputs) and not dced_jaxpr.effects:
+    return used_inputs, None
+  else:
+    new_effs = core.eqn_effects(dced_jaxpr)
+    new_eqn = pe.new_jaxpr_eqn(
+        [v for v, used in zip(eqn.invars, used_inputs) if used],
+        [v for v, used in zip(eqn.outvars, used_outputs) if used],
+        eqn.primitive, new_params, new_effs, eqn.source_info, eqn.ctx)
+    return used_inputs, new_eqn
 pe.dce_rules[xla_metadata_call_p] = dce_jaxpr_xla_metadata_rule

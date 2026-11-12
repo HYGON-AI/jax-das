@@ -98,7 +98,7 @@ def _reduce_window(
       raise ValueError(
         'reduce_window output must have the same tree structure as the operands'
         f' {operand_tree} vs. {out_tree}')
-    flat_operands = core.standard_insert_pvary(*flat_operands)
+    flat_operands = core.auto_insert_reshard(*flat_operands)
     out_flat = reduce_window_p.bind(
         *flat_operands,
         *flat_init_values,
@@ -289,7 +289,7 @@ def _select_and_scatter(operand: Array, select: Callable,
     select, core.typeof(init_value))
   scatter_jaxpr, scatter_consts = lax._reduction_jaxpr(
     scatter, core.typeof(init_value))
-  operand, source, init_value = core.standard_insert_pvary(
+  operand, source, init_value = core.auto_insert_reshard(
       operand, source, init_value)
   return select_and_scatter_p.bind(
       operand, source, init_value, select_jaxpr=select_jaxpr,
@@ -302,7 +302,7 @@ def _select_and_scatter_add(source: Array, operand: Array,
                             window_dimensions: core.Shape,
                             window_strides: Sequence[int],
                             padding: Sequence[tuple[int, int]]) -> Array:
-  source, operand = core.standard_insert_pvary(source, operand)
+  source, operand = core.auto_insert_reshard(source, operand)
   return select_and_scatter_add_p.bind(
       source, operand, select_prim=select_prim,
       window_dimensions=tuple(window_dimensions),
@@ -338,7 +338,7 @@ def _select_and_gather_add(tangents: Array, operand: Array,
     An array containing the elements in `tangents` corresponding to the output
     of the reduction of `operand` fin each window.
   """
-  tangents, operand = core.standard_insert_pvary(tangents, operand)
+  tangents, operand = core.auto_insert_reshard(tangents, operand)
   return select_and_gather_add_p.bind(
       tangents, operand, select_prim=select_prim,
       window_dimensions=tuple(window_dimensions),
@@ -732,8 +732,8 @@ def _select_and_scatter_lower(
   assert isinstance(operand_aval, ShapedArray)
   scalar_aval = operand_aval.update(
       shape=(), sharding=operand_aval.sharding.update(spec=()))
-  scalar_type = mlir.aval_to_ir_type(scalar_aval)
-  result_type = mlir.aval_to_ir_type(aval_out)
+  scalar_type = mlir.aval_to_ir_type(ctx.module_context, scalar_aval)
+  result_type = mlir.aval_to_ir_type(ctx.module_context, aval_out)
   op = hlo.SelectAndScatterOp(
       result_type,
       operand,
@@ -741,7 +741,7 @@ def _select_and_scatter_lower(
       init_value,
       window_dimensions=mlir.dense_int_array(window_dimensions),
       window_strides=mlir.dense_int_array(window_strides),
-      padding=ir.DenseIntElementsAttr.get(np.asarray(padding, np.int64),  # pyrefly: ignore[no-matching-overload]
+      padding=ir.DenseIntElementsAttr.get(np.asarray(padding, np.int64),
                                           shape=(len(padding), 2)))
   select = op.select.blocks.append(scalar_type, scalar_type)
   with ir.InsertionPoint(select):
@@ -931,10 +931,10 @@ def _select_and_gather_add_lowering(
     def pack(a, b, ab_aval):
       word_type_ab_aval = ab_aval.update(dtype=word_dtype)
       double_word_type_ab_aval = ab_aval.update(dtype=double_word_dtype)
-      a = hlo.bitcast_convert(mlir.aval_to_ir_type(word_type_ab_aval), a)
-      b = hlo.bitcast_convert(mlir.aval_to_ir_type(word_type_ab_aval), b)
-      a = hlo.convert(mlir.aval_to_ir_type(double_word_type_ab_aval), a)
-      b = hlo.convert(mlir.aval_to_ir_type(double_word_type_ab_aval), b)
+      a = hlo.bitcast_convert(mlir.aval_to_ir_type(ctx.module_context, word_type_ab_aval), a)
+      b = hlo.bitcast_convert(mlir.aval_to_ir_type(ctx.module_context, word_type_ab_aval), b)
+      a = hlo.convert(mlir.aval_to_ir_type(ctx.module_context, double_word_type_ab_aval), a)
+      b = hlo.convert(mlir.aval_to_ir_type(ctx.module_context, double_word_type_ab_aval), b)
       a = hlo.shift_left(
           a, _broadcast_scalar_const(nbits, double_word_type_ab_aval))
       return hlo.or_(a, b)
@@ -950,8 +950,8 @@ def _select_and_gather_add_lowering(
     # Unpacks the second element of a double_word_type.
     def snd(t, t_aval):
       return hlo.bitcast_convert(
-          mlir.aval_to_ir_type(t_aval.update(dtype=dtype)),
-          hlo.convert(mlir.aval_to_ir_type(t_aval.update(dtype=word_dtype)), t))
+          mlir.aval_to_ir_type(ctx.module_context, t_aval.update(dtype=dtype)),
+          hlo.convert(mlir.aval_to_ir_type(ctx.module_context, t_aval.update(dtype=word_dtype)), t))
 
   else:
     # The double-word trick above only works if we have a sufficiently large
@@ -976,8 +976,8 @@ def _select_and_gather_add_lowering(
                                 mantissa_bits=mlir.i32_attr(nmant))
       b = hlo.reduce_precision(b, exponent_bits=mlir.i32_attr(nexp),
                                 mantissa_bits=mlir.i32_attr(nmant))
-      a = hlo.bitcast_convert(mlir.aval_to_ir_type(word_type_ab_aval), a)
-      b = hlo.bitcast_convert(mlir.aval_to_ir_type(word_type_ab_aval), b)
+      a = hlo.bitcast_convert(mlir.aval_to_ir_type(ctx.module_context, word_type_ab_aval), a)
+      b = hlo.bitcast_convert(mlir.aval_to_ir_type(ctx.module_context, word_type_ab_aval), b)
       b = hlo.shift_right_logical(
           b, _broadcast_scalar_const(r_nbits, word_type_ab_aval))
       return hlo.or_(a, b)
@@ -991,7 +991,7 @@ def _select_and_gather_add_lowering(
     # Unpacks the second element of a double_word_type.
     def snd(t, t_aval):
       return hlo.bitcast_convert(
-          mlir.aval_to_ir_type(t_aval.update(dtype=dtype)),
+          mlir.aval_to_ir_type(ctx.module_context, t_aval.update(dtype=dtype)),
           hlo.shift_left(t, _broadcast_scalar_const(r_nbits, t_aval.update(dtype=word_dtype))))
 
   assert select_prim is lax.ge_p or select_prim is lax.le_p, select_prim
@@ -1004,8 +1004,7 @@ def _select_and_gather_add_lowering(
     x, y = reducer.arguments
     assert select_prim is lax.ge_p or select_prim is lax.le_p
     cmp_op = "GE" if select_prim is lax.ge_p else "LE"
-    out = hlo.SelectOp(mlir.compare_hlo(fst(x), fst(y), cmp_op), x, y)
-    return out.results
+    return [hlo.select(mlir.compare_hlo(fst(x), fst(y), cmp_op), x, y)]
 
   res, = mlir.reduce_window(ctx,
       reducer_name="reduce_window_select_and_gather_add",

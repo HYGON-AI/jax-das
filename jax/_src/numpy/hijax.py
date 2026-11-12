@@ -15,7 +15,8 @@
 """NumPy function implementations as hijax primitives."""
 import functools
 import operator
-from typing import Any, Callable
+from typing import Any
+from collections.abc import Callable
 
 import numpy as np
 
@@ -308,7 +309,7 @@ def _searchsorted_impl(sorted_arr: ArrayLike, query: ArrayLike, *, dimension: in
   return fun(sorted_arr, query)
 
 
-@functools.partial(api.jit, static_argnames=["side", "dtype", "unrolled"])
+@api.jit(static_argnames=["side", "dtype", "unrolled"])
 def _searchsorted_scan_impl(
     sorted_arr: Array, query: Array, side: str, dtype: np.dtype, unrolled: bool
 ) -> Array:
@@ -339,7 +340,7 @@ def _searchsorted_scan_impl(
   return carry[1].astype(dtype)
 
 
-@functools.partial(api.jit, static_argnames=["side", "dtype"])
+@api.jit(static_argnames=["side", "dtype"])
 def _searchsorted_sort_impl(
     sorted_arr: Array, query: Array, side: str, dtype: np.dtype
 ) -> Array:
@@ -367,7 +368,7 @@ def _searchsorted_sort_impl(
   ).astype(dtype)
 
 
-@functools.partial(api.jit, static_argnames=["side", "dtype"])
+@api.jit(static_argnames=["side", "dtype"])
 def _searchsorted_compare_all_impl(
     sorted_arr: Array, query: Array, side: str, dtype: np.dtype
 ) -> Array:
@@ -414,7 +415,7 @@ def searchsorted(
   Returns:
     An array specifying the insertion locations of `query` into `sorted_arr`.
   """
-  sorted_arr, query = core.standard_insert_pvary(sorted_arr, query)
+  sorted_arr, query = core.auto_insert_reshard(sorted_arr, query)
   out_dtype = dtypes._maybe_canonicalize_explicit_dtype(np.dtype(dtype), "searchsorted")
   prim = SearchSorted(
     core.typeof(sorted_arr),
@@ -441,7 +442,7 @@ def searchsorted_via_expand(
     dtype: DTypeLike = "int32",
 ):
   """Compute searchsorted() without binding the hijax primitive."""
-  sorted_arr, query = core.standard_insert_pvary(sorted_arr, query)
+  sorted_arr, query = core.auto_insert_reshard(sorted_arr, query)
   out_dtype = dtypes._maybe_canonicalize_explicit_dtype(np.dtype(dtype), "searchsorted")
   prim = SearchSorted(
     core.typeof(sorted_arr),
@@ -478,7 +479,7 @@ def nonzero(
   Returns:
     Tuple of length ``len(axes)`` containing the indices of each nonzero value.
   """
-  a, = core.standard_insert_pvary(a)
+  a, = core.auto_insert_reshard(a)
   out_dtype = dtypes._maybe_canonicalize_explicit_dtype(np.dtype(dtype), "nonzero")
   axes = util.canonicalize_axis_tuple(axes, np.ndim(a))
   prim = Nonzero(

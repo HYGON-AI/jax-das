@@ -21,7 +21,7 @@ import dataclasses
 import functools
 import math
 import itertools as it
-from typing import Any, NamedTuple, cast
+from typing import Any, cast
 
 from jax._src import config
 from jax._src import core
@@ -37,18 +37,16 @@ from jax._src.mesh import (
 from jax._src.lib import xla_client as xc
 from jax._src.lib.mlir.dialects import sdy
 from jax._src.named_sharding import (  # noqa: F401
-    SdyArray, SdyDim, UnspecifiedValue, AUTO, flatten_spec, NamedSharding,
+    SdyArray, SdyDim, UnspecifiedValue, flatten_spec, NamedSharding,
     _check_unique_resources, UNSPECIFIED,
     ArrayMapping, ArrayMappingOrAutoOrUnspecified, get_array_mapping,
-    array_mapping_to_axis_resources, named_sharding_to_xla_hlo_sharding,
-    modify_sdy_sharding_wrt_axis_types)
+    array_mapping_to_axis_resources, named_sharding_to_xla_hlo_sharding)
 from jax._src.op_shardings import (
     are_hlo_shardings_equal, get_num_ways_dim_sharded,
     is_hlo_sharding_replicated)
 from jax._src.partition_spec import PartitionSpec
 from jax._src.util import use_cpp_class, use_cpp_method
 import numpy as np
-from jax._src.lib import jaxlib_extension_version
 
 
 config_ext = xc._xla.config
@@ -86,13 +84,14 @@ def device_replica_id_map(sharding, global_shape: Shape) -> Mapping[Device, int]
   return out
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(frozen=True)
 class SdyArrayList:
-  shardings: Sequence[SdyArray]
+  shardings: tuple[SdyArray, ...]
 
-  def build(self) -> sdy.TensorShardingPerValueAttr:
+  def build(self, cache: dict[SdyArray, sdy.TensorShardingAttr]
+            ) -> sdy.TensorShardingPerValueAttr:
     return sdy.TensorShardingPerValueAttr.get(
-        [sharding.build() for sharding in self.shardings])
+        [sharding.build(cache) for sharding in self.shardings])
 
 
 replicated_hlo_sharding = xc.HloSharding.replicate()
@@ -168,9 +167,9 @@ class SingleDeviceSharding(jsharding.Sharding):
   def _to_xla_hlo_sharding(self, num_dimensions: int) -> xc.HloSharding:
     return replicated_hlo_sharding
 
-  def _to_sdy_sharding(self, num_dimensions: int) -> SdyArray:
-    sdy_dim_sharding = [SdyDim(axes=[], is_open=False)
-                        for _ in range(num_dimensions)]
+  def _to_sdy_sharding(self, num_dimensions: int,
+                       modify_wrt_axis_types: bool = False) -> SdyArray:
+    sdy_dim_sharding = (SdyDim(axes=(), is_open=False),) * num_dimensions
     return SdyArray(mesh_shape=None, dim_shardings=sdy_dim_sharding)
 
   @property
@@ -187,12 +186,8 @@ class SingleDeviceSharding(jsharding.Sharding):
 SingleDeviceSharding.__module__ = 'jax.sharding'
 
 
-if jaxlib_extension_version >= 432:
-  def make_single_device_sharding(device, *, memory_kind=None):
-    return SingleDeviceSharding(device, memory_kind=memory_kind)
-else:
-  def make_single_device_sharding(device, memory_kind=None):
-    return SingleDeviceSharding(device, memory_kind=memory_kind)
+def make_single_device_sharding(device, *, memory_kind=None):
+  return SingleDeviceSharding(device, memory_kind=memory_kind)
 
 
 def _unpickle_gspmd_sharding(devices, op_sharding, memory_kind):
@@ -275,14 +270,15 @@ class GSPMDSharding(jsharding.Sharding):
   def _to_xla_hlo_sharding(self, num_dimensions: int) -> xc.HloSharding:
     return self._hlo_sharding
 
-  def _to_sdy_sharding(self, num_dimensions: int) -> SdyArray:
+  def _to_sdy_sharding(self, num_dimensions: int,
+                       modify_wrt_axis_types: bool = False) -> SdyArray:
     if self._hlo_sharding.tuple_elements():
       raise TypeError(
           f'Cannot convert GSPMDSharding {self._hlo_sharding} into SdyArray.')
     elif self._hlo_sharding.is_replicated():
       empty_mesh = AbstractMesh((), ())
-      return NamedSharding(empty_mesh, PartitionSpec())._to_sdy_sharding(
-          num_dimensions)
+      return NamedSharding(empty_mesh, PartitionSpec()
+                           )._to_sdy_sharding(num_dimensions)
     elif self._hlo_sharding.is_tiled():
       if not self._hlo_sharding.is_tile_assignment_iota():
         raise TypeError(
@@ -290,8 +286,8 @@ class GSPMDSharding(jsharding.Sharding):
       axis_sizes = tuple(self._hlo_sharding.get_axis_sizes())
       axis_names = tuple(f'_axis_{i}' for i in range(len(axis_sizes)))
       mesh = AbstractMesh(axis_sizes, axis_names)
-      return _gspmd_to_named_sharding_via_mesh(self, mesh)._to_sdy_sharding(
-          num_dimensions)
+      return _gspmd_to_named_sharding_via_mesh(
+          self, mesh)._to_sdy_sharding(num_dimensions)
     else:
       raise TypeError(
           f'Cannot convert GSPMDSharding {self._hlo_sharding} into SdyArray.')
@@ -321,7 +317,7 @@ def prepare_axis_resources(axis_resources, arg_name,
 
   new_entries: list[Any] = []
   for entry in entries:
-    if isinstance(entry, (UnspecifiedValue, AUTO)) or entry is None:
+    if isinstance(entry, UnspecifiedValue) or entry is None:
       new_entries.append(entry)
     elif isinstance(entry, jsharding.Sharding):
       if isinstance(entry, NamedSharding) and entry.mesh.empty:
@@ -343,18 +339,10 @@ def prepare_axis_resources(axis_resources, arg_name,
             f' {entry}')
       _check_unique_resources(entry, arg_name)
       new_entries.append(entry)
-
   return tree_util.tree_unflatten(treedef, new_entries)
 
 
 # Axis environments
-
-class AxisEnv(NamedTuple):
-  """Represents a pmap mesh (only along the replica axes)."""
-  nreps: int
-  names: tuple[Any, ...]
-  sizes: tuple[int, ...]
-
 
 @dataclasses.dataclass(frozen=True)
 class SPMDAxisContext:
@@ -366,32 +354,6 @@ class SPMDAxisContext:
   """
   mesh: Mesh
   manual_axes: frozenset[MeshAxisName] = frozenset()
-
-  @property
-  def axis_env(self):
-    # All collectives that touch axis_env should remember to set use_global_device_ids
-    # when this context is enabled!
-    return self.unsafe_axis_env
-
-  @property
-  def unsafe_axis_env(self):
-    return AxisEnv(
-        nreps=self.mesh.size,
-        names=self.mesh.axis_names,
-        sizes=tuple(self.mesh.shape.values()))
-
-  def extend_manual(self, axes: frozenset[MeshAxisName]) -> SPMDAxisContext:
-    return SPMDAxisContext(self.mesh, self.manual_axes | axes)
-
-
-@dataclasses.dataclass(frozen=True)
-class ReplicaAxisContext:
-  """A hardware axis context for parallel computations that are partitioned by JAX.
-
-  Unlike in the SPMDAxisContext, this means that JAX might need to emit calls to
-  explicit collectives.
-  """
-  axis_env: AxisEnv
 
 
 @dataclasses.dataclass(frozen=True)
@@ -409,11 +371,6 @@ class ShardingContext:
     if self.device_assignment is not None:
       assert isinstance(self.device_assignment, tuple)
       assert self.num_devices == len(self.device_assignment)
-
-  # Similar to SPMDContext as ShardingContext also uses the GSPMD partitioner.
-  @property
-  def axis_env(self):
-    return AxisEnv(nreps=1, names=(), sizes=())
 
 
 # -------------------- XLA OpSharding to PartitionSpec --------------------

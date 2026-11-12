@@ -52,9 +52,8 @@ AbstractRefPytree: TypeAlias = Sequence[
     Union[state.AbstractRef, "AbstractRefPytree"]
 ]
 
-def _get_block_size(
-    bd: pl.Blocked | pl.Element | pl.Squeezed | pl.BoundedSlice | int | None,
-) -> int:
+
+def _get_block_size(bd: pl.BlockDim | int | None) -> int:
   match bd:
     case int():
       return bd
@@ -62,6 +61,7 @@ def _get_block_size(
       return bd.block_size
     case _:
       raise NotImplementedError(f"Unsupported block size type: {type(bd)}")
+
 
 def _get_block_shape(spec: pallas_core.BlockSpec):
   if spec.block_shape is None:
@@ -191,7 +191,7 @@ def _inc_grid_by_1(
 
 
 def _in_smem(spec: pallas_core.BlockSpec) -> bool:
-  return spec.memory_space in (None, gpu_core.SMEM)
+  return spec.memory_space in (pallas_core.MemorySpace.DEFAULT, gpu_core.SMEM, None)
 
 def _downcast_spec(
     spec: gpu_core.BlockSpec | pallas_core.BlockSpec,

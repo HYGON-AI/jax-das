@@ -1,4 +1,6 @@
 load("@llvm-project//mlir:tblgen.bzl", "gentbl_cc_library", "td_library")
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_cc//cc:cc_test.bzl", "cc_test")
 
 # Copyright 2023 The JAX Authors.
 #
@@ -13,9 +15,7 @@ load("@llvm-project//mlir:tblgen.bzl", "gentbl_cc_library", "td_library")
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-load("@rules_cc//cc:cc_library.bzl", "cc_library")
-load("@rules_cc//cc:cc_test.bzl", "cc_test")
-load("@rules_python//python:defs.bzl", "py_library")
+load("//jaxlib:jax.bzl", "py_library")
 
 licenses(["notice"])
 
@@ -279,11 +279,23 @@ cc_library(
 )
 
 cc_test(
+    name = "tiled_layout_test",
+    srcs = ["dialect/tpu/tiled_layout_test.cc"],
+    deps = [
+        ":tpu_dialect",
+        "@com_google_googletest//:gtest_main",
+        "@llvm-project//mlir:IR",
+        "@llvm-project//mlir:Support",
+        "@xla//xla:shape_util",
+    ],
+)
+
+cc_test(
     name = "vreg_util_test",
     srcs = ["dialect/tpu/vreg_util_test.cc"],
     deps = [
         ":tpu_dialect",
-        "//testing/base/public:gunit_main",
+        "@com_google_googletest//:gtest_main",
         "@llvm-project//llvm:Support",
         "@llvm-project//mlir:ArithDialect",
         "@llvm-project//mlir:IR",
@@ -297,7 +309,7 @@ cc_test(
     srcs = ["dialect/tpu/array_util_test.cc"],
     deps = [
         ":tpu_dialect",
-        "//testing/base/public:gunit_main",
+        "@com_google_googletest//:gtest_main",
         "@llvm-project//mlir:Support",
         "@xla//xla:array",
     ],
@@ -308,8 +320,8 @@ cc_test(
     srcs = ["dialect/tpu/tpu_ops_verification_test.cc"],
     deps = [
         ":tpu_dialect",
-        "//testing/base/public:gunit_main",
         "@com_google_absl//absl/status",
+        "@com_google_googletest//:gtest_main",
         "@llvm-project//mlir:ArithDialect",
         "@llvm-project//mlir:FuncDialect",
         "@llvm-project//mlir:IR",

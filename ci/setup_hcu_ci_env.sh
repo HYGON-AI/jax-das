@@ -190,11 +190,9 @@ install_dtk
 install_aillvm
 install_bazelisk
 install_node
-pin_hipblaslt_tensile_libpath
 
 echo "HCU CI environment ready:"
 echo "  DTK        ${DTK_DIR}"
 echo "  HCU LLVM   ${DTK_DIR}/aillvm (${AILLVM_MAJOR})"
 echo "  bazel      $(command -v bazel) (bazelisk ${BAZELISK_VERSION})"
 echo "  node       $(/usr/local/node/bin/node --version)"
-echo "  hipblaslt  ${HIPBLASLT_TENSILE_LIBPATH:-<not pinned>}"

@@ -604,7 +604,7 @@ class DebugInfoTest(jtu.JaxTestCase):
 
   def test_jit_with_static_argnums(self):
     tracer_spy = TracerSpy()
-    @functools.partial(jax.jit, static_argnums=(1,))
+    @jax.jit(static_argnums=(1,))
     def my_f(a, d):
       tracer_spy.append(a)
       return a
