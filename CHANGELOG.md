@@ -16,12 +16,6 @@ When releasing, please add the new-release-boilerplate to docs/pallas/CHANGELOG.
 
 ## Unreleased
 
-* Breaking changes
-  * The deprecated module jax.cloud_tpu_init was removed. This did nothing and
-    references to it can be safely removed.
-  * Support for Python 3.11, NumPy 2.0, and SciPy 1.14 has been dropped, per the
-    [deprecation policy](https://docs.jax.dev/en/latest/deprecation.html).
-
 * Deprecations
   * Passing 2-dimensional arrays (or mixed 2D and 3D arrays) to {func}`jax.numpy.cross` is deprecated and will be removed in JAX 0.12.0, aligning with NumPy 2.5 behavior.
 
@@ -58,6 +52,8 @@ When releasing, please add the new-release-boilerplate to docs/pallas/CHANGELOG.
     matrices ({jax-issue}`#10144`).
   * Added {func}`jax.scipy.linalg.helmert` for constructing Helmert matrices
     ({jax-issue}`#10144`).
+  * Added {func}`jax.scipy.special.boxcox` and
+    {func}`jax.scipy.special.boxcox1p` for the Box-Cox power transformation.
   * Moved RNG APIs from "implementations" to dtypes ({jax-issue}`#27854`):
     * Added `jax.random.key_dtype` to get the dtype corresponding to a PRNG
       implementation name.
@@ -141,7 +137,6 @@ When releasing, please add the new-release-boilerplate to docs/pallas/CHANGELOG.
     `call`, `concretization_function_error`, `custom_typechecks`, `is_concrete`,
     `is_constant_dim`, `is_constant_shape`, `literalable_types`, `no_axis_name`,
     `pytype_aval_mappings`, and `trace_ctx`.
-  * Passing 2-dimensional arrays (or mixed 2D and 3D arrays) to {func}`jax.numpy.cross` is deprecated and will be removed in JAX 0.12.0, aligning with NumPy 2.5 behavior.
 
 * Changes:
   * The minimum supported SciPy version is now 1.14.
