@@ -20,7 +20,7 @@ on:
     branches:
       - main
       - dev
-    # Every PR revision requires a fresh ready-hcu label from a maintainer.
+    # Reapply ready-hcu after each new PR revision to request CI.
     types: [labeled]
   push:
     branches:
