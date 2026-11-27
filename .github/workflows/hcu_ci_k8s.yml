@@ -20,19 +20,8 @@ on:
     branches:
       - main
       - dev
-    types: [opened, synchronize, reopened, ready_for_review]
-    paths:
-      - "jax/**"
-      - "jaxlib/**"
-      - "jax_plugins/**"
-      - "tests/**"
-      - "build/**"
-      - "scripts/**"
-      - "third_party/**"
-      - "MODULE.bazel"
-      - "WORKSPACE"
-      - ".bazelrc"
-      - ".github/workflows/hcu_ci_k8s.yml"
+    # Every PR revision requires a fresh ready-hcu label from a maintainer.
+    types: [labeled]
   push:
     branches:
       - main
@@ -48,7 +37,10 @@ jobs:
     name: Manual Approval for CI
     runs-on: ubuntu-latest
     environment: ci-protection
-    if: ${{ github.event_name == 'pull_request_target' }}
+    if: >-
+      github.event_name == 'pull_request_target' &&
+      github.event.action == 'labeled' &&
+      github.event.label.name == 'ready-hcu'
     steps:
       - run: echo "Waiting for approval..."
 
@@ -56,7 +48,14 @@ jobs:
     name: Build JAX wheels
     runs-on: hygon-build
     needs: [manual_approval]
-    if: ${{ !cancelled() && (needs.manual_approval.result == 'success' || needs.manual_approval.result == 'skipped') }}
+    if: >-
+      !cancelled() &&
+      ((github.event_name == 'pull_request_target' &&
+        github.event.action == 'labeled' &&
+        github.event.label.name == 'ready-hcu' &&
+        needs.manual_approval.result == 'success') ||
+       (github.event_name != 'pull_request_target' &&
+        needs.manual_approval.result == 'skipped'))
     timeout-minutes: 120
     container:
       image: ${{ vars.HCU_IMAGE_REGISTRY }}/hcu/base/dtk:26.04-rockylinux8.6-py3.12
@@ -69,7 +68,8 @@ jobs:
       - name: Checking out jax-das
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          ref: ${{ github.event.pull_request.number && format('refs/pull/{0}/head', github.event.pull_request.number) || github.sha }}
+          # Pin to the revision approved by the label, even if the PR changes later.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           path: jax-das
           persist-credentials: false
 
@@ -147,6 +147,9 @@ jobs:
   # near-duplicate fast/full jobs. runs-on supports `needs.*.outputs` here.
   plan:
     name: Select test pool
+    if: >-
+      github.event_name != 'pull_request_target' ||
+      (github.event.action == 'labeled' && github.event.label.name == 'ready-hcu')
     runs-on: hygon-cpu
     outputs:
       pool: ${{ steps.plan.outputs.pool }}
@@ -196,7 +199,7 @@ jobs:
       - name: Checking out jax-das
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          ref: ${{ github.event.pull_request.number && format('refs/pull/{0}/head', github.event.pull_request.number) || github.sha }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           path: jax-das
           persist-credentials: false
 
